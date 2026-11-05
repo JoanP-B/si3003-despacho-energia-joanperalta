@@ -1,0 +1,33 @@
+# Entorno virtual
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# Secretos / API keys
+.env
+*.key
+
+# Datos crudos pesados (mantener instrucciones de descarga, no los binarios grandes)
+data/raw/*.csv
+data/raw/*.parquet
+!data/raw/.gitkeep
+
+# Índices vectoriales generados
+*.faiss
+*.index
+.chroma/
+
+# PDFs del corpus (pueden ser pesados; documentar fuente en README)
+corpus_regulacion/*.pdf
+!corpus_regulacion/.gitkeep
+
+# SO / editor
+.DS_Store
+Thumbs.db
+.vscode/

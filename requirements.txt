@@ -1,0 +1,29 @@
+# --- Núcleo de datos y análisis ---
+pandas
+numpy
+matplotlib
+jupyter
+ipykernel
+
+# --- Fuente de datos XM (precio de bolsa, demanda, generación) ---
+pydataxm
+
+# --- Parte 1: RL (implementación propia; estas libs son de apoyo numérico/plot) ---
+# (el MDP / Q-learning se implementa desde cero en src/part1_rl)
+
+# --- Parte 2: Agente LLM + RAG ---
+openai                 # cliente compatible con NVIDIA NIM / Groq / Ollama
+langchain              # utilidades de agente/RAG (opcional)
+langgraph              # loop agéntico opcional (Clase 12)
+faiss-cpu              # índice vectorial para RAG
+sentence-transformers  # embeddings locales
+pypdf                  # ingestión de PDFs del corpus regulatorio
+tiktoken               # conteo de tokens
+
+# --- Dashboard ---
+streamlit
+plotly
+
+# --- Utilidades ---
+python-dotenv          # manejo de API keys desde .env
+requests
