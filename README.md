@@ -158,6 +158,7 @@ streamlit run src/dashboard/app.py
 
 - El sistema es una herramienta analítica y educativa; **no** constituye asesoría regulatoria,
   legal ni financiera.
+- **Incertidumbre del mercado y volatilidad del precio:** El modelo de aprendizaje por refuerzo (MDP/Q-Learning) se entrena sobre datos históricos del precio de bolsa de XM. Dado que el mercado energético colombiano está expuesto a choques externos e impredecibles (como fenómenos climáticos de El Niño o fallas), las decisiones óptimas aprendidas por el agente en períodos pasados podrían no ser óptimas frente a escenarios atípicos o cambios bruscos en la oferta y demanda.
 
 ## 7. Declaración de uso de IA
 
