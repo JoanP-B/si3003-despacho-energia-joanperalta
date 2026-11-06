@@ -1,3 +1,7 @@
+# Dependencias de Python para instalar dentro de un entorno virtual:
+# python -m pip install -r requirements.txt
+# Los prerrequisitos del sistema Linux se documentan en README.md.
+
 # --- Núcleo de datos y análisis ---
 pandas
 numpy

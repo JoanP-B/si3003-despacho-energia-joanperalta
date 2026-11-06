@@ -2,57 +2,28 @@
 
 Proyecto Final — SI3003 Inteligencia Artificial — Universidad EAFIT — 2026-1
 
-Idea **3.3** del enunciado: decidir **cuándo cargar o descargar una batería** (o desplazar
-demanda) según el **precio de bolsa** de energía en Colombia, combinando un modelo clásico de
-**Aprendizaje por Refuerzo (RL)** con un **agente LLM + RAG** sobre regulación del sector.
-
 ## Integrantes
 
 - Joan Stiven Peralta Bedoya
 
-## Asunto del correo de entrega
-
-`si3003-AI-grupo-peralta`
-
-> Pendiente de confirmar el nombre de grupo definitivo. Cada integrante debe enviar el
-> repositorio a `jipadillab@eafit.edu.co`.
-
----
-
 ## 1. Problema
 
-El precio de bolsa de energía en Colombia varía hora a hora. Un operador con una batería
-(almacenamiento) puede ahorrar dinero si **carga cuando el precio es bajo** y **descarga cuando
-el precio es alto**, respetando los límites físicos de la batería. El reto es encontrar una
-**política de operación** que maximice el ahorro frente a políticas de referencia, y explicar
-esas decisiones a la luz de la regulación vigente.
+El precio de bolsa de energía en Colombia varía cada hora. Como es un mercado volátil, no siempre es evidente cuándo conviene comprar o vender. El precio, administrado por XM, depende de factores como la oferta hídrica y el clima, la demanda y la disponibilidad del sistema.
 
-## 2. Datos (reales, Colombia)
+Una empresa con un consumo alto o un operador de baterías enfrenta varios retos:
 
-| Fuente | Qué aporta | Acceso |
-|--------|-----------|--------|
-| **XM** (operador del mercado) | Demanda, **precio de bolsa**, generación | Librería [`pydataxm`](https://github.com/EquipoAnaliticaXM/API_XM) (API pública) |
-| **IDEAM** | Radiación solar (opcional, para demanda/generación solar) | datos.gov.co / DHIME |
-| **Corpus regulatorio** | Resoluciones **CREG** y documentos de **XM** | PDFs descargados → `corpus_regulacion/` |
+- Comprar energía cuando el precio es alto incrementa los costos.
+- Sin una estrategia clara, una batería puede cargarse en horas caras o descargarse sin obtener un beneficio significativo.
+- La regulación de la CREG (Comisión de Regulación de Energía y Gas) establece reglas para operar y comercializar energía.
 
-**Plan B (requisito de las primeras 48 h):** si la API de XM falla, se usan históricos de precio
-de bolsa descargados en `data/raw/` como CSV. Ver `notebooks/01_eda.ipynb`.
 
-> **Verificación de acceso (2026-11-05):** `pydataxm` quedó instalada y el host
-> `servapibi.xm.com.co` es alcanzable, pero la primera llamada falló por verificación de
-> certificado SSL del entorno Windows (`CERTIFICATE_VERIFY_FAILED`). Es un problema de CA del
-> entorno, no del código. Opciones: instalar/actualizar certificados de CA, o usar el plan B
-> con un CSV en `data/raw/precio_bolsa.csv`. El módulo `src/data/download_xm.py` ya cae
-> automáticamente al plan B ante cualquier fallo de la API.
-
-## 3. Arquitectura de la solución
+## 2. Arquitectura de la solución
 
 ```
-                 ┌─────────────────────────────────────────────┐
-                 │                 Dashboard                    │
-                 │        (Streamlit: precio vs decisión,       │
-                 │   ahorro acumulado, parámetros batería, chat)│
-                 └───────────────┬──────────────┬───────────────┘
+                   ┌─────────▼───────────────────▼──────────────┐
+                   │        Datos XM (pydataxm) + CSV plan B     │
+                   │        Corpus CREG/XM (FAISS/Chroma)        │
+                   └─────────────────────────────────────────────┘
                                  │              │
                    ┌─────────────▼───┐    ┌─────▼───────────────┐
                    │  Parte 1: RL    │    │  Parte 2: Agente LLM│
@@ -60,36 +31,45 @@ de bolsa descargados en `data/raw/` como CSV. Ver `notebooks/01_eda.ipynb`.
                    │  (propio)       │    │                     │
                    └─────────┬───────┘    └──────┬──────────────┘
                              │                   │
-                   ┌─────────▼───────────────────▼──────────────┐
-                   │        Datos XM (pydataxm) + CSV plan B     │
-                   │        Corpus CREG/XM (FAISS/Chroma)        │
-                   └─────────────────────────────────────────────┘
+                 ┌─────────────────────────────────────────────┐
+                 │                 Dashboard                    │
+                 │        (Streamlit: precio vs decisión,       │
+                 │   ahorro acumulado, parámetros batería, chat)│
+                 └───────────────┬──────────────┬───────────────┘
+
 ```
 
-### Parte 1 — Técnica clásica (implementada por el equipo)
+### La solución propuesta
 
-- **MDP** del problema de despacho de batería: estado (hora, nivel de carga, precio), acciones
-  (cargar / descargar / mantener), recompensa (ahorro monetario), con **iteración de valor** o
-  **Q-learning** implementados desde cero.
-- Comparación obligatoria contra una **política ingenua** y una **política de referencia**, con
-  métrica cuantitativa (ahorro acumulado, % de mejora).
+El proyecto combina la toma de decisiones mediante aprendizaje por refuerzo con una herramienta de consulta regulatoria en lenguaje natural.
 
-### Parte 2 — Agente LLM
+#### Componente A: motor de decisión
 
-- **Loop agéntico** (manual u opcional LangGraph) con endpoint compatible con OpenAI de capa
-  gratuita (NVIDIA NIM / Groq / Ollama).
-- **RAG** sobre resoluciones CREG y documentos de XM (embeddings + FAISS o Chroma).
-- **Herramientas (≥ 2):**
-  - `simulate(policy, dates)` — simula una política sobre un rango de fechas y devuelve ahorro.
-  - `search_docs(query)` — recupera y cita fragmentos del corpus regulatorio.
-  - (opcional) `get_price(date)` — consulta el precio de bolsa.
+- **Técnica:** Proceso de Decisión de Markov (MDP), resuelto mediante Q-learning o iteración de valores.
+- **Funcionamiento:** Cada hora, el agente observa el nivel de carga de la batería y el rango de precio, y decide si cargar, descargar o mantener el nivel actual.
+- **Objetivo:** Maximizar el ahorro acumulado al evitar comprar energía de la red durante las horas caras.
+- **Evaluación:** Comparar el agente de aprendizaje por refuerzo con una política base, por ejemplo, cargar a las 2:00 y descargar a las 19:00.
 
-### Dashboard
+#### Componente B: copiloto regulatorio
 
-- Serie de tiempo de **precio vs. decisiones** de la política.
-- **Ahorro acumulado**.
-- Controles para que el usuario modifique **parámetros de la batería** (capacidad, potencia,
-  eficiencia) y **converse con el agente**.
+- **Técnica:** Agente basado en un modelo de lenguaje (LLM), con generación aumentada por recuperación (RAG) y uso de herramientas.
+- **Funcionamiento:** El sistema indexa resoluciones de la CREG y documentos de XM. El agente puede ejecutar simulaciones y buscar información en el corpus regulatorio.
+- **Objetivo:** Responder consultas combinando resultados cuantitativos de las simulaciones con información regulatoria pertinente.
+
+#### Componente C: dashboard
+
+Desarrollado con Streamlit, permite ajustar parámetros como la capacidad de la batería (kWh), seleccionar fechas de prueba, visualizar precios y decisiones de carga o descarga, y consultar al copiloto.
+
+
+## 3. Datos (reales, Colombia)
+
+| Fuente | Qué aporta | Acceso |
+|--------|-----------|--------|
+| **XM** (operador del mercado) | Demanda, **precio de bolsa**, generación | Librería [`pydataxm`](https://github.com/EquipoAnaliticaXM/API_XM) (API pública) |
+| **IDEAM** | Radiación solar (opcional, para demanda/generación solar) | datos.gov.co / DHIME |
+| **Corpus regulatorio** | Resoluciones **CREG** y documentos de **XM** | PDFs descargados → `corpus_regulacion/` |
+
+**Plan B:** si la API de XM falla, se usan históricos de precio de bolsa guardados como CSV en `data/raw/`. Para el análisis exploratorio, consulta [`notebooks/01_eda.ipynb`](notebooks/01_eda.ipynb).
 
 ## 4. Estructura del repositorio
 
@@ -108,50 +88,77 @@ de bolsa descargados en `data/raw/` como CSV. Ver `notebooks/01_eda.ipynb`.
 │   ├── rag/                  # ingestión del corpus + índice vectorial
 │   └── dashboard/            # app Streamlit
 ├── docs/
-│   └── informe.md            # informe breve (máx. 4 páginas)
+│   └── informe.md            # informe breve
 ├── requirements.txt
 ├── Uso_IA.md                 # declaración de uso de IA generativa
 └── README.md
 ```
 
-## 5. Cómo ejecutar (reproducible)
+## 5. Instalación y ejecución
+
+Ejecuta estos comandos desde la raíz del repositorio.
+
+### Windows (PowerShell)
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
+
+### Linux
+
+Instala Python, pip y el soporte para entornos virtuales con el gestor de paquetes de tu distribución.
+
+En Debian o Ubuntu:
 
 ```bash
-# 1. Crear entorno virtual
-python -m venv .venv
-# Windows PowerShell:
-.\.venv\Scripts\Activate.ps1
-# Linux/Mac:
-# source .venv/bin/activate
+sudo apt update
+sudo apt install python3 python3-pip python3-venv
+```
 
-# 2. Instalar dependencias
-pip install -r requirements.txt
+En Arch Linux:
 
-# 3. Descargar / preparar datos (ver notebook de EDA)
+```bash
+sudo pacman -S --needed python python-pip
+```
+
+Desde la raíz del repositorio, crea y activa un entorno virtual e instala las dependencias Python:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+El entorno virtual evita instalar paquetes en el Python administrado por el sistema. En otras distribuciones, instala los paquetes equivalentes a Python 3, pip y `venv` con su gestor de paquetes y luego ejecuta los mismos comandos.
+
+### Preparar datos y ejecutar la aplicación
+
+Con el entorno virtual activado, abre el notebook de análisis exploratorio:
+
+```bash
 jupyter notebook notebooks/01_eda.ipynb
+```
 
-# 4. (más adelante) lanzar el dashboard
+Para descargar el precio de bolsa desde XM, indica las fechas en formato `AAAA-MM-DD`. Si la API no está disponible, el módulo intenta usar el CSV de respaldo en `data/raw/`:
+
+```bash
+python -m src.data.download_xm --inicio 2024-01-01 --fin 2024-03-31
+```
+
+Para iniciar el dashboard:
+
+```bash
 streamlit run src/dashboard/app.py
 ```
 
-## 6. Cronograma (del enunciado)
-
-| Fecha | Hito | Estado |
-|-------|------|--------|
-| Mié 4 – Jue 5 nov | Equipo, idea elegida, datos descargados, primer EDA | **En curso** |
-| Vie 6 – Dom 8 nov | Modelo Parte 1 con métrica y línea base | Pendiente |
-| Lun 9 nov | Checkpoint: agente mínimo + dashboard esqueleto | Pendiente |
-| Lun 9 – Mié 11 nov | RAG, herramientas, visualizaciones, interacción | Pendiente |
-| Jue 12 nov | Congelar código, README, declaración de IA | Pendiente |
-| Vie 13 nov 6:00 p.m. | Entrega final en GitHub | Pendiente |
-
-## 7. Limitaciones
+## 6. Limitaciones
 
 - El sistema es una herramienta analítica y educativa; **no** constituye asesoría regulatoria,
   legal ni financiera.
-- El reto principal es la correcta **definición del entorno MDP** (es la opción técnicamente más
-  rigurosa del enunciado).
 
-## 8. Declaración de uso de IA
+## 7. Declaración de uso de IA
 
 Ver [`Uso_IA.md`](Uso_IA.md).
