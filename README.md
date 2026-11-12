@@ -162,4 +162,4 @@ streamlit run src/dashboard/app.py
 
 ## 7. Declaración de uso de IA
 
-Ver [`Uso_IA.md`](Uso_IA.md).
+Ver [`Uso_IA.md`]( /si3003-despacho-energia-joanperalta/docs/Uso_IA.md).
