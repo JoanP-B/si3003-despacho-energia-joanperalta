@@ -22,8 +22,11 @@ langchain-core         # mensajes, @tool y bind_tools del agente
 langchain-groq         # proveedor LLM (requiere GROQ_API_KEY)
 langgraph              # loop agéntico opcional (Clase 12)
 faiss-cpu              # índice vectorial para RAG
-sentence-transformers  # embeddings locales
+sentence-transformers  # embeddings locales (all-MiniLM-L6-v2); instala torch
 pypdf                  # ingestión de PDFs del corpus regulatorio
+langchain-community    # PyPDFLoader y FAISS
+langchain-huggingface  # HuggingFaceEmbeddings
+langchain-text-splitters  # RecursiveCharacterTextSplitter
 tiktoken               # conteo de tokens
 
 # --- Dashboard ---

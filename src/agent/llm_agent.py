@@ -1,16 +1,21 @@
-"""Parte 2 — Agente LLM mínimo ("Copiloto Regulatorio") con loop agéntico manual.
+"""Parte 2 — Agente LLM ("Copiloto Regulatorio y Operativo") con loop agéntico manual.
 
-Checkpoint: un agente con UNA herramienta simulada (mock RAG). La búsqueda vectorial
-real sobre el corpus CREG se conecta en el siguiente hito.
+Herramientas reales:
+    - query_creg_regulation: búsqueda semántica (FAISS, top-3) en el corpus CREG.
+    - simular_despacho: ejecuta la política Q-Learning entrenada (Parte 1) y la Línea Base.
 
 Loop agéntico (máximo T_MAX iteraciones):
     1. El LLM recibe el historial y decide: responder o pedir una herramienta.
-    2. Si pide herramienta, se ejecuta localmente. Cualquier excepción se captura y se
-       devuelve al LLM como observación (ToolMessage) para que la explique o corrija.
+    2. Si pide herramienta, se ejecuta localmente. Los errores se devuelven al LLM como
+       observación (ToolMessage con status="error") para que los explique o corrija.
     3. Se repite hasta obtener una respuesta sin tool calls o agotar T_MAX; en ese caso
        se fuerza una respuesta final sin herramientas.
 
 Proveedor: Groq vía ``langchain-groq`` (requiere la variable de entorno GROQ_API_KEY).
+
+Requisitos previos:
+    python -m src.rag.vectorstore          # construye data/processed/faiss_index
+    notebooks/02_mdp_rl.ipynb              # genera q_table.json y precios_evaluacion.csv
 
 Uso por consola:
     python -m src.agent.llm_agent "¿Qué dice la CREG sobre almacenamiento con baterías?"
@@ -21,7 +26,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
@@ -38,6 +43,8 @@ from langchain_core.tools import BaseTool, tool
 DEFAULT_MODEL = "openai/gpt-oss-120b"
 T_MAX = 5  # límite de iteraciones del loop (definido en el informe)
 MAX_TURNOS_HISTORIAL = 10  # pares usuario/asistente que se conservan como memoria
+TOP_K = 3  # fragmentos que devuelve el RAG
+PREFIJO_ERROR = "ERROR"  # las herramientas devuelven errores como texto con este prefijo
 
 SYSTEM_PROMPT = """Eres el Copiloto Regulatorio y Operativo de un sistema de \
 almacenamiento de energía con baterías (BESS) en Colombia. El sistema hace \
@@ -45,15 +52,22 @@ desplazamiento de demanda (load shifting): carga la batería en horas de precio 
 bolsa bajo y la descarga para cubrir demanda propia en horas caras. No especula ni \
 vende energía a la red.
 
+Herramientas:
+- query_creg_regulation: para cualquier pregunta sobre regulación, normas o \
+resoluciones CREG. Úsala antes de responder y cita cada fragmento que uses con el \
+formato (Fuente: archivo, página N), o (Fuente: archivo) si no trae página. No uses \
+otros marcadores de cita.
+- simular_despacho: para preguntas sobre ahorro, desempeño del agente de RL o \
+comparación con la Línea Base. Tú no calculas cifras: repórtalas tal como las devuelve \
+la herramienta. Si la herramienta indica que los precios son simulados, dilo.
+
 Reglas:
-- Para cualquier pregunta sobre regulación, normas o resoluciones CREG, usa la \
-herramienta query_creg_regulation antes de responder y cita la resolución que devuelva.
-- Toda afirmación normativa debe salir del texto que devolvió la herramienta. No \
-completes con conocimiento propio: no inventes requisitos, cifras, artículos ni \
-resoluciones. Si el fragmento no trae el detalle pedido, dilo explícitamente.
-- No repitas una consulta con los mismos argumentos; usa el resultado que ya tienes.
-- Si una herramienta devuelve un error, explícale al usuario qué falló en lenguaje \
-sencillo; si puedes corregir los argumentos, reintenta una vez.
+- Toda afirmación normativa debe salir de los fragmentos devueltos. No completes con \
+conocimiento propio: no inventes requisitos, cifras, artículos ni resoluciones. Si los \
+fragmentos no traen el detalle pedido, dilo explícitamente.
+- No repitas una llamada con los mismos argumentos; usa el resultado que ya tienes.
+- Si una herramienta devuelve un texto que empieza por ERROR, explícale al usuario qué \
+falló en lenguaje sencillo; si puedes corregir los argumentos, reintenta una vez.
 - Responde en español, de forma breve y clara."""
 
 
@@ -62,28 +76,81 @@ sencillo; si puedes corregir los argumentos, reintenta una vez.
 # --------------------------------------------------------------------------- #
 @tool
 def query_creg_regulation(topic: str) -> str:
-    """Consulta el corpus regulatorio de la CREG sobre un tema y devuelve fragmentos
-    normativos con su fuente. Úsala para preguntas sobre regulación de baterías
-    (BESS), autogeneración, mercado de energía o precio de bolsa.
+    """Busca en el corpus de resoluciones CREG los 3 fragmentos más relevantes sobre un
+    tema y los devuelve con su fuente (archivo y página). Úsala para preguntas sobre
+    regulación de baterías (SAEB/BESS), autogeneración, generación distribuida o
+    mercado de energía.
 
     Args:
-        topic: Tema regulatorio a consultar, por ejemplo "almacenamiento con baterías".
+        topic: Tema o pregunta regulatoria, por ejemplo "remuneración de los SAEB".
     """
-    # MOCK: la búsqueda vectorial (FAISS) sobre corpus_regulacion/ llega en el próximo hito.
     tema = (topic or "").strip()
     if not tema:
-        raise ValueError("El parámetro 'topic' está vacío; indica un tema regulatorio.")
-    if len(tema) > 300:
-        raise ValueError("El tema es demasiado largo (máximo 300 caracteres).")
+        return f"{PREFIJO_ERROR}: el parámetro 'topic' está vacío; indica un tema regulatorio."
+    if len(tema) > 500:
+        return f"{PREFIJO_ERROR}: el tema es demasiado largo (máximo 500 caracteres)."
+
+    try:
+        from src.rag.vectorstore import RAGError, buscar
+    except ImportError as exc:
+        return f"{PREFIJO_ERROR}: el módulo RAG no está disponible ({exc})."
+    try:
+        fragmentos = buscar(tema, k=TOP_K)
+    except RAGError as exc:
+        return f"{PREFIJO_ERROR}: el índice regulatorio no está disponible. {exc}"
+    except Exception as exc:  # noqa: BLE001 - p. ej. falta de dependencias de embeddings
+        return f"{PREFIJO_ERROR}: falló la búsqueda en el corpus ({type(exc).__name__}: {exc})."
+
+    if not fragmentos:
+        return f"No se encontraron fragmentos sobre '{tema}' en el corpus CREG."
+    bloques = []
+    for i, frag in enumerate(fragmentos, 1):
+        pagina = f", página {frag['pagina']}" if frag.get("pagina") else ""
+        bloques.append(f"[{i}] Fuente: {frag['fuente']}{pagina}\n{frag['texto'].strip()}")
+    return f"Fragmentos del corpus CREG sobre '{tema}':\n\n" + "\n\n---\n\n".join(bloques)
+
+
+@tool
+def simular_despacho(capacidad_kwh: float) -> str:
+    """Simula el despacho de una batería con la política Q-Learning entrenada y con la
+    Línea Base (carga 02:00, descarga 19:00) sobre los días de evaluación, y devuelve el
+    ahorro acumulado de cada una en COP.
+
+    Args:
+        capacidad_kwh: Capacidad de la batería en kWh (mayor que 0), por ejemplo 100.
+    """
+    try:
+        from src.part1_rl.simulacion import SimulacionError, simular
+    except ImportError as exc:
+        return f"{PREFIJO_ERROR}: el módulo de simulación no está disponible ({exc})."
+    try:
+        r = simular(capacidad_kwh)
+    except SimulacionError as exc:
+        return f"{PREFIJO_ERROR}: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        return f"{PREFIJO_ERROR}: la simulación falló ({type(exc).__name__}: {exc})."
+
+    if r.ahorro_base_cop:
+        mejora = f" ({r.diferencia_cop / abs(r.ahorro_base_cop):+.1%} frente a la Línea Base)"
+    else:
+        mejora = ""
+    aviso = (
+        " Advertencia: los precios de evaluación son SIMULADOS, no datos reales de XM."
+        if r.fuente_datos == "simulado" else f" Fuente de precios: {r.fuente_datos}."
+    )
     return (
-        f"Fragmento normativo simulado sobre {tema} según Resolución CREG 098. "
-        "[MOCK] Este resultado no contiene texto normativo real: la búsqueda en el "
-        "corpus CREG aún no está conectada. Solo se puede afirmar que la Resolución "
-        "CREG 098 de 2019 trata sobre sistemas de almacenamiento con baterías (BESS)."
+        f"Simulación completada para batería de {r.capacidad_kwh:,.1f} kWh "
+        f"({r.energia_por_nivel_kwh:,.2f} kWh por escalón de SoC) sobre {r.n_dias} días "
+        f"de evaluación ({r.fecha_inicio} a {r.fecha_fin}). "
+        f"Ahorro total usando Q-Learning: ${r.ahorro_qlearning_cop:,.0f} COP. "
+        f"Ahorro Línea Base: ${r.ahorro_base_cop:,.0f} COP. "
+        f"Diferencia: ${r.diferencia_cop:,.0f} COP{mejora}. "
+        f"Q-Learning hizo {r.cargas_qlearning} cargas, {r.descargas_qlearning} descargas y "
+        f"{r.invalidas_qlearning} acciones inválidas.{aviso}"
     )
 
 
-TOOLS: list[BaseTool] = [query_creg_regulation]
+TOOLS: list[BaseTool] = [query_creg_regulation, simular_despacho]
 
 
 # --------------------------------------------------------------------------- #
@@ -284,7 +351,8 @@ class RegulatoryAgent:
             return f"ERROR al ejecutar {nombre}: {type(exc).__name__}: {exc}", True
 
         if isinstance(resultado, str):
-            return resultado, False
+            # Las herramientas reportan fallos esperados como texto "ERROR: ...".
+            return resultado, resultado.startswith(PREFIJO_ERROR)
         try:
             return json.dumps(resultado, ensure_ascii=False, default=str), False
         except (TypeError, ValueError):

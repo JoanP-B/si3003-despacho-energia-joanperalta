@@ -72,6 +72,8 @@ class QLearningAgent:
         self.epsilon = float(epsilon_inicial)
 
         self._rng = np.random.default_rng(semilla)
+        # Información de contexto guardada junto a la Q-Table (ver ``guardar``).
+        self.metadatos: dict = {}
 
         # Q-Table dispersa: se crea una fila de ceros al visitar un estado nuevo.
         self.q_table: Dict[State, np.ndarray] = defaultdict(
@@ -84,10 +86,14 @@ class QLearningAgent:
     def seleccionar_accion(self, estado: State, explorar: bool = True) -> int:
         """Devuelve una acción mediante epsilon-greedy.
 
-        Con ``explorar=False`` actúa de forma greedy (para evaluación).
-        Los empates entre valores Q máximos se rompen aleatoriamente.
+        Con ``explorar=True`` (entrenamiento) los empates entre valores Q máximos se
+        rompen al azar. Con ``explorar=False`` (evaluación) la política es greedy y
+        determinista: ante un empate gana la acción de menor índice (MANTENER en
+        estados no visitados), así una misma Q-Table siempre da el mismo resultado.
         """
-        if explorar and self._rng.random() < self.epsilon:
+        if not explorar:
+            return int(np.argmax(self.q_table[estado]))
+        if self._rng.random() < self.epsilon:
             return int(self._rng.integers(self.n_acciones))
         return self._greedy(estado)
 
@@ -152,8 +158,13 @@ class QLearningAgent:
     # ------------------------------------------------------------------ #
     # Persistencia (JSON: legible y sin riesgos de deserializar pickle)
     # ------------------------------------------------------------------ #
-    def guardar(self, ruta: str | Path) -> Path:
-        """Guarda hiperparámetros y Q-Table en un archivo JSON."""
+    def guardar(self, ruta: str | Path, metadatos: dict | None = None) -> Path:
+        """Guarda hiperparámetros, Q-Table y metadatos opcionales en un JSON.
+
+        ``metadatos`` debe ser serializable a JSON. Se usa para guardar lo que
+        hace falta para reutilizar la política (p. ej. los umbrales de cuartil
+        de precio del entrenamiento y la ruta de los datos de evaluación).
+        """
         ruta = Path(ruta)
         ruta.parent.mkdir(parents=True, exist_ok=True)
         datos = {
@@ -164,12 +175,13 @@ class QLearningAgent:
             "epsilon_final": self.epsilon_final,
             "episodios_decaimiento": self.episodios_decaimiento,
             "epsilon": self.epsilon,
+            "metadatos": metadatos or {},
             "q_table": {
                 ",".join(map(str, estado)): valores.tolist()
                 for estado, valores in self.q_table.items()
             },
         }
-        ruta.write_text(json.dumps(datos, indent=1), encoding="utf-8")
+        ruta.write_text(json.dumps(datos, indent=1, default=str), encoding="utf-8")
         return ruta
 
     @classmethod
@@ -190,12 +202,13 @@ class QLearningAgent:
                 semilla=semilla,
             )
             agente.epsilon = float(datos["epsilon"])
+            agente.metadatos = dict(datos.get("metadatos") or {})
             for clave, valores in datos["q_table"].items():
                 estado = tuple(int(x) for x in clave.split(","))
                 fila = np.asarray(valores, dtype=float)
                 if fila.shape != (agente.n_acciones,):
                     raise ValueError(f"Fila Q con forma inválida para el estado {clave}.")
                 agente.q_table[estado] = fila  # type: ignore[index]
-        except (KeyError, json.JSONDecodeError) as exc:
+        except (KeyError, TypeError, AttributeError, json.JSONDecodeError) as exc:
             raise ValueError(f"Archivo de Q-Table corrupto o incompleto: {ruta}") from exc
         return agente

@@ -18,10 +18,11 @@ data/raw/*.csv
 data/raw/*.parquet
 !data/raw/.gitkeep
 
-# Índices vectoriales generados
+# Índices vectoriales generados (se reconstruyen con: python -m src.rag.vectorstore)
 *.faiss
 *.index
 .chroma/
+data/processed/faiss_index/
 
 # PDFs del corpus (pueden ser pesados; documentar fuente en README)
 corpus_regulacion/*.pdf
