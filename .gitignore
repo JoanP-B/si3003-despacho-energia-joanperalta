@@ -31,3 +31,7 @@ corpus_regulacion/*.pdf
 .DS_Store
 Thumbs.db
 .vscode/
+
+# Rutas
+
+data/processed/q_table.json
