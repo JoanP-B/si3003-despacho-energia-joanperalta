@@ -18,6 +18,8 @@ pydataxm
 # --- Parte 2: Agente LLM + RAG ---
 openai                 # cliente compatible con NVIDIA NIM / Groq / Ollama
 langchain              # utilidades de agente/RAG (opcional)
+langchain-core         # mensajes, @tool y bind_tools del agente
+langchain-groq         # proveedor LLM (requiere GROQ_API_KEY)
 langgraph              # loop agéntico opcional (Clase 12)
 faiss-cpu              # índice vectorial para RAG
 sentence-transformers  # embeddings locales
