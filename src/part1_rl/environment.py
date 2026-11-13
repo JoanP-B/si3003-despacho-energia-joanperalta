@@ -10,6 +10,9 @@ respetando las restricciones físicas reales del sistema BESS.
 
 Episodio: un día real del historial (24 pasos de 1 hora).
 
+Línea Base justa (``naive_policy``): carga en las horas 01-04 y descarga en las 18-21,
+usando los 4 escalones de SoC, sin mirar el precio.
+
 Estado (tupla discreta para evitar explosión de estados):
     (hora_del_dia, cuartil_de_precio, nivel_soc)
       - hora_del_dia:      int 0..23
@@ -230,17 +233,22 @@ class BatteryEnv:
         return self.estado, float(recompensa), bool(terminado), info
 
     # ------------------------------------------------------------------ #
-    # Línea base (baseline) ingenua
+    # Línea base (baseline) ingenua y justa
     # ------------------------------------------------------------------ #
+    HORAS_CARGA_BASE: Tuple[int, ...] = (1, 2, 3, 4)
+    HORAS_DESCARGA_BASE: Tuple[int, ...] = (18, 19, 20, 21)
+
     @staticmethod
     def naive_policy(state: State) -> int:
-        """Política ingenua de referencia (ciega al precio).
+        """Línea Base justa (ciega al precio) que usa los 4 escalones de la batería.
 
-        Carga a las 02:00, descarga a las 19:00 y mantiene el resto del día.
+        Carga en las horas 01-04 mientras ``nivel_soc < 4``, descarga en las horas 18-21
+        mientras ``nivel_soc > 0`` y mantiene el resto del día. Nunca intenta una acción
+        física inválida.
         """
-        hora = state[0]
-        if hora == 2:
+        hora, _, soc = state
+        if hora in BatteryEnv.HORAS_CARGA_BASE and soc < BatteryEnv.N_NIVELES_SOC - 1:
             return int(Accion.CARGAR)
-        if hora == 19:
+        if hora in BatteryEnv.HORAS_DESCARGA_BASE and soc > 0:
             return int(Accion.DESCARGAR)
         return int(Accion.MANTENER)

@@ -17,6 +17,8 @@ __pycache__/
 data/raw/*.csv
 data/raw/*.parquet
 !data/raw/.gitkeep
+# Respaldo de XM (plan B): se versiona para que el notebook corra sin la API.
+!data/raw/xm_precio_bolsa.csv
 
 # Índices vectoriales generados (se reconstruyen con: python -m src.rag.vectorstore)
 *.faiss
@@ -36,3 +38,4 @@ Thumbs.db
 # Rutas
 
 data/processed/q_table.json
+data/processed/politica_referencia.json

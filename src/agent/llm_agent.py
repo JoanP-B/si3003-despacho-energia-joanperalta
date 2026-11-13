@@ -2,7 +2,8 @@
 
 Herramientas reales:
     - query_creg_regulation: búsqueda semántica (FAISS, top-3) en el corpus CREG.
-    - simular_despacho: ejecuta la política Q-Learning entrenada (Parte 1) y la Línea Base.
+    - simular_despacho: ejecuta la política Q-Learning entrenada (Parte 1), la Línea Base
+      y la política de referencia (Iteración de Valores).
 
 Loop agéntico (máximo T_MAX iteraciones):
     1. El LLM recibe el historial y decide: responder o pedir una herramienta.
@@ -15,7 +16,8 @@ Proveedor: Groq vía ``langchain-groq`` (requiere la variable de entorno GROQ_AP
 
 Requisitos previos:
     python -m src.rag.vectorstore          # construye data/processed/faiss_index
-    notebooks/02_mdp_rl.ipynb              # genera q_table.json y precios_evaluacion.csv
+    notebooks/02_mdp_rl.ipynb              # genera q_table.json, politica_referencia.json
+                                           # y precios_evaluacion.csv
 
 Uso por consola:
     python -m src.agent.llm_agent "¿Qué dice la CREG sobre almacenamiento con baterías?"
@@ -58,8 +60,10 @@ resoluciones CREG. Úsala antes de responder y cita cada fragmento que uses con 
 formato (Fuente: archivo, página N), o (Fuente: archivo) si no trae página. No uses \
 otros marcadores de cita.
 - simular_despacho: para preguntas sobre ahorro, desempeño del agente de RL o \
-comparación con la Línea Base. Tú no calculas cifras: repórtalas tal como las devuelve \
-la herramienta. Si la herramienta indica que los precios son simulados, dilo.
+comparación con la Línea Base o la política de referencia (Iteración de Valores). Tú no \
+calculas cifras: repórtalas tal como las devuelve la herramienta, incluso si Q-Learning \
+ahorra menos que la Línea Base. Envía fecha_inicio y fecha_fin solo si el usuario pide un \
+rango de fechas. Si la herramienta indica que los precios son simulados, dilo.
 
 Reglas:
 - Toda afirmación normativa debe salir de los fragmentos devueltos. No completes con \
@@ -111,20 +115,25 @@ def query_creg_regulation(topic: str) -> str:
 
 
 @tool
-def simular_despacho(capacidad_kwh: float) -> str:
-    """Simula el despacho de una batería con la política Q-Learning entrenada y con la
-    Línea Base (carga 02:00, descarga 19:00) sobre los días de evaluación, y devuelve el
-    ahorro acumulado de cada una en COP.
+def simular_despacho(
+    capacidad_kwh: float, fecha_inicio: str | None = None, fecha_fin: str | None = None
+) -> str:
+    """Simula el despacho de una batería sobre los días de evaluación (precios reales de
+    XM) con tres políticas: Q-Learning entrenado, Línea Base (carga 01-04 h, descarga
+    18-21 h) e Iteración de Valores (política de referencia). Devuelve el ahorro
+    acumulado de cada una en COP.
 
     Args:
         capacidad_kwh: Capacidad de la batería en kWh (mayor que 0), por ejemplo 100.
+        fecha_inicio: Opcional, AAAA-MM-DD. Úsalo solo si el usuario pide un rango de fechas.
+        fecha_fin: Opcional, AAAA-MM-DD. Úsalo solo si el usuario pide un rango de fechas.
     """
     try:
         from src.part1_rl.simulacion import SimulacionError, simular
     except ImportError as exc:
         return f"{PREFIJO_ERROR}: el módulo de simulación no está disponible ({exc})."
     try:
-        r = simular(capacidad_kwh)
+        r = simular(capacidad_kwh, fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
     except SimulacionError as exc:
         return f"{PREFIJO_ERROR}: {exc}"
     except Exception as exc:  # noqa: BLE001
@@ -134,9 +143,12 @@ def simular_despacho(capacidad_kwh: float) -> str:
         mejora = f" ({r.diferencia_cop / abs(r.ahorro_base_cop):+.1%} frente a la Línea Base)"
     else:
         mejora = ""
+    fraccion = r.fraccion_de_referencia
+    ref = f" (Q-Learning logra el {fraccion:.1%} de la referencia)" if fraccion is not None else ""
     aviso = (
         " Advertencia: los precios de evaluación son SIMULADOS, no datos reales de XM."
-        if r.fuente_datos == "simulado" else f" Fuente de precios: {r.fuente_datos}."
+        if r.fuente_datos == "simulado"
+        else f" Fuente de precios: {r.fuente_datos} (datos reales)."
     )
     return (
         f"Simulación completada para batería de {r.capacidad_kwh:,.1f} kWh "
@@ -144,7 +156,8 @@ def simular_despacho(capacidad_kwh: float) -> str:
         f"de evaluación ({r.fecha_inicio} a {r.fecha_fin}). "
         f"Ahorro total usando Q-Learning: ${r.ahorro_qlearning_cop:,.0f} COP. "
         f"Ahorro Línea Base: ${r.ahorro_base_cop:,.0f} COP. "
-        f"Diferencia: ${r.diferencia_cop:,.0f} COP{mejora}. "
+        f"Ahorro Iteración de Valores (referencia): ${r.ahorro_referencia_cop:,.0f} COP{ref}. "
+        f"Diferencia Q-Learning menos Línea Base: ${r.diferencia_cop:,.0f} COP{mejora}. "
         f"Q-Learning hizo {r.cargas_qlearning} cargas, {r.descargas_qlearning} descargas y "
         f"{r.invalidas_qlearning} acciones inválidas.{aviso}"
     )
