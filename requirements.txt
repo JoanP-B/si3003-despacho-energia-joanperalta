@@ -11,6 +11,7 @@ ipykernel
 
 # --- Fuente de datos XM (precio de bolsa, demanda, generación) ---
 pydataxm
+truststore             # usa los certificados del SO (evita CERTIFICATE_VERIFY_FAILED con la API de XM en Windows)
 
 # --- Parte 1: RL (implementación propia; estas libs son de apoyo numérico/plot) ---
 # (el MDP / Q-learning se implementa desde cero en src/part1_rl)
@@ -30,7 +31,7 @@ langchain-text-splitters  # RecursiveCharacterTextSplitter
 tiktoken               # conteo de tokens
 
 # --- Dashboard ---
-streamlit
+streamlit>=1.46       # usa width="stretch" en botones y gráficas
 plotly
 
 # --- Utilidades ---

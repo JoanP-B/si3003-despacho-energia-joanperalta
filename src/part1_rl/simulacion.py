@@ -4,7 +4,9 @@ Carga los artefactos que guarda ``notebooks/02_mdp_rl.ipynb`` en ``data/processe
 
 - ``q_table.json``: Q-Table del agente Q-Learning y metadatos (umbrales de cuartil, etc.).
 - ``politica_referencia.json``: política de Iteración de Valores (referencia).
-- ``precios_evaluacion.csv``: precios reales de XM de los días de prueba (15 % final).
+- ``precios_evaluacion.csv``: precios reales de XM de los días de prueba (15 % final) y
+  los umbrales de cuartil de cada hora (ventana móvil causal de 168 h, calculada con la
+  serie completa, así las primeras horas de prueba usan la semana anterior).
 
 Recorre cada día de evaluación (episodio de 24 h, batería vacía al inicio) con tres
 políticas: Q-Learning (greedy), Línea Base justa (carga 01-04 h, descarga 18-21 h) e
@@ -94,7 +96,11 @@ def _a_fecha(valor: "date | datetime | str | None", nombre: str) -> date | None:
         raise SimulacionError(f"{nombre} debe tener formato AAAA-MM-DD; se recibió {valor!r}.") from exc
 
 
-def _cargar_precios(ruta: Path) -> pd.Series:
+COLUMNAS_UMBRALES = ["umbral_p25", "umbral_p50", "umbral_p75"]
+
+
+def _cargar_precios(ruta: Path) -> pd.DataFrame:
+    """Lee ``precios_evaluacion.csv``: precio y, si existen, umbrales causales por hora."""
     if not ruta.exists():
         raise SimulacionError(
             f"No existen los precios de evaluación en {ruta}. "
@@ -102,14 +108,27 @@ def _cargar_precios(ruta: Path) -> pd.Series:
         )
     try:
         df = pd.read_csv(ruta, parse_dates=["timestamp"])
-        precios = pd.to_numeric(df["precio_cop_kwh"], errors="raise")
+        columnas = ["precio_cop_kwh"] + [c for c in COLUMNAS_UMBRALES if c in df.columns]
+        datos = df[columnas].apply(pd.to_numeric, errors="raise")
     except (KeyError, ValueError, pd.errors.ParserError) as exc:
         raise SimulacionError(f"Archivo de precios inválido ({ruta.name}): {exc}") from exc
-    precios.index = pd.DatetimeIndex(df["timestamp"])
-    return precios
+    datos.index = pd.DatetimeIndex(df["timestamp"])
+    return datos
 
 
-def _filtrar_fechas(precios: pd.Series, inicio: date | None, fin: date | None) -> pd.Series:
+def periodo_evaluacion(q_table_path: Path = Q_TABLE_PATH) -> tuple[date, date]:
+    """Primer y último día disponibles para ``simular()`` (para el dashboard)."""
+    try:
+        meta = QLearningAgent.cargar(q_table_path).metadatos
+    except (FileNotFoundError, ValueError) as exc:
+        raise SimulacionError(f"{exc} Entrena el agente con notebooks/02_mdp_rl.ipynb.") from exc
+    datos = _cargar_precios(
+        Path(q_table_path).parent / meta.get("archivo_precios_evaluacion", "precios_evaluacion.csv")
+    )
+    return datos.index.min().date(), datos.index.max().date()
+
+
+def _filtrar_fechas(precios: pd.DataFrame, inicio: date | None, fin: date | None) -> pd.DataFrame:
     disponibles_ini = precios.index.min().date()
     disponibles_fin = precios.index.max().date()
     rango = f"{disponibles_ini} a {disponibles_fin}"
@@ -168,11 +187,6 @@ def simular(
         raise SimulacionError(str(exc)) from exc
 
     meta = agente.metadatos
-    if "umbrales_precio" not in meta:
-        raise SimulacionError(
-            "La Q-Table no tiene los umbrales de precio del entrenamiento. "
-            "Vuelve a ejecutar notebooks/02_mdp_rl.ipynb para regenerarla."
-        )
     ruta_ref = q_table_path.parent / meta.get("archivo_politica_referencia", POLITICA_REF_NOMBRE)
     try:
         referencia = PoliticaReferencia.cargar(ruta_ref)
@@ -184,7 +198,20 @@ def simular(
     precios = _cargar_precios(
         q_table_path.parent / meta.get("archivo_precios_evaluacion", "precios_evaluacion.csv")
     )
-    precios = _filtrar_fechas(precios, inicio, fin)
+    datos = _filtrar_fechas(precios, inicio, fin)
+    precios = datos["precio_cop_kwh"]
+
+    # Umbrales causales precalculados por hora (ventana móvil) o, en artefactos antiguos,
+    # los cuartiles fijos del entrenamiento guardados en los metadatos.
+    if set(COLUMNAS_UMBRALES) <= set(datos.columns):
+        umbrales = datos[COLUMNAS_UMBRALES].to_numpy()
+    elif "umbrales_precio" in meta:
+        umbrales = meta["umbrales_precio"]
+    else:
+        raise SimulacionError(
+            "Faltan los umbrales de cuartil de precio (columnas umbral_p25..p75 en los "
+            "precios de evaluación). Vuelve a ejecutar notebooks/02_mdp_rl.ipynb."
+        )
 
     energia = capacidad / (BatteryEnv.N_NIVELES_SOC - 1)
     try:
@@ -193,7 +220,7 @@ def simular(
             soc_inicial=int(meta.get("soc_inicial", 0)),
             penalizacion_invalida=float(meta.get("penalizacion_invalida", -1000.0)),
             energia_por_nivel_kwh=energia,
-            umbrales_precio=meta["umbrales_precio"],
+            umbrales_precio=umbrales,
             aleatorio=False,
         )
     except ValueError as exc:

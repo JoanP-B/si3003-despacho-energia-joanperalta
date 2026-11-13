@@ -4,7 +4,8 @@ Mismo MDP que ``BatteryEnv`` (estado ``(hora, cuartil_precio, nivel_soc)``), per
 con programación dinámica sobre un **modelo empírico** estimado solo con los días de
 entrenamiento:
 
-- ``precio_medio[h, q]``: precio medio observado en la hora ``h`` cuando su cuartil es ``q``.
+- ``precio_medio[h, q]``: precio medio observado en la hora ``h`` cuando su cuartil es ``q``
+  (cuartil relativo a la ventana móvil causal de 168 h, el mismo que ve el agente).
   La recompensa esperada de cargar/descargar es ``∓precio_medio[h, q] · energía``.
 - ``transicion[h, q, q']``: probabilidad empírica de que la hora ``h+1`` caiga en el cuartil
   ``q'`` dado que la hora ``h`` está en ``q`` (pares de horas consecutivas del mismo día).
@@ -87,18 +88,21 @@ class PoliticaReferencia:
 
 
 def estimar_modelo(
-    precios_train: "np.ndarray | Sequence[float]", umbrales_precio: Sequence[float]
+    precios_train: "np.ndarray | Sequence[float]",
+    umbrales_precio: "np.ndarray | Sequence[float] | None" = None,
 ) -> ModeloEmpirico:
-    """Estima recompensas medias y transiciones de cuartil con los días de entrenamiento."""
+    """Estima recompensas medias y transiciones de cuartil con los días de entrenamiento.
+
+    ``umbrales_precio`` se interpreta igual que en ``BatteryEnv`` (3 valores fijos, una
+    fila por hora, o ``None`` para la ventana móvil causal), así el cuartil de cada hora
+    es exactamente el que observa el agente.
+    """
     precios = np.asarray(precios_train, dtype=float).ravel()
     if precios.size == 0 or precios.size % N_H:
         raise ValueError("precios_train debe contener días completos (múltiplo de 24).")
-    umbrales = np.asarray(umbrales_precio, dtype=float).ravel()
-    if umbrales.size != N_Q - 1:
-        raise ValueError("umbrales_precio debe tener 3 valores (p25, p50, p75).")
 
     P = precios.reshape(-1, N_H)
-    Q = np.searchsorted(umbrales, P, side="right")  # (dias, 24) -> 0..3
+    Q = BatteryEnv(precios, umbrales_precio=umbrales_precio).cuartiles_diarios  # (dias, 24)
 
     conteos = np.zeros((N_H, N_Q))
     suma = np.zeros((N_H, N_Q))
@@ -163,7 +167,7 @@ def iterar_valores(
 
 def value_iteration_policy(
     precios_train: "np.ndarray | Sequence[float]",
-    umbrales_precio: Sequence[float],
+    umbrales_precio: "np.ndarray | Sequence[float] | None" = None,
     energia_por_nivel_kwh: float = 1.0,
     gamma: float = 0.99,
     penalizacion_invalida: float = -1000.0,

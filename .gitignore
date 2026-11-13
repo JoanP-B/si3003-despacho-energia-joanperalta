@@ -26,16 +26,17 @@ data/raw/*.parquet
 .chroma/
 data/processed/faiss_index/
 
-# PDFs del corpus (pueden ser pesados; documentar fuente en README)
+# PDFs del corpus: se ignoran por defecto, salvo los que indexa el RAG (versionados para
+# que el índice se reconstruya sin descargas manuales).
 corpus_regulacion/*.pdf
 !corpus_regulacion/.gitkeep
+!corpus_regulacion/Creg174-2021.pdf
 
 # SO / editor
 .DS_Store
 Thumbs.db
 .vscode/
 
-# Rutas
-
-data/processed/q_table.json
-data/processed/politica_referencia.json
+# Los artefactos de la Parte 1 (q_table.json, politica_referencia.json,
+# precios_evaluacion.csv) se versionan: pesan < 100 KB y permiten abrir el dashboard sin
+# reentrenar. Se regeneran con notebooks/02_mdp_rl.ipynb.

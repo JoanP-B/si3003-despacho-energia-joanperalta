@@ -16,7 +16,8 @@ usando los 4 escalones de SoC, sin mirar el precio.
 Estado (tupla discreta para evitar explosión de estados):
     (hora_del_dia, cuartil_de_precio, nivel_soc)
       - hora_del_dia:      int 0..23
-      - cuartil_de_precio: int 0..3  (cuantiles 25/50/75 del historial)
+      - cuartil_de_precio: int 0..3  (p25/p50/p75 de una ventana móvil causal de las
+                                      168 h anteriores; ver ``umbrales_moviles``)
       - nivel_soc:         int 0..4  (0%, 25%, 50%, 75%, 100%)
 
 Acciones:
@@ -38,6 +39,38 @@ import pandas as pd
 
 # Tipo del estado discreto expuesto por el entorno.
 State = Tuple[int, int, int]
+
+VENTANA_CUARTILES_H = 168  # 7 días
+
+
+def umbrales_moviles(
+    precios: "np.ndarray | pd.Series | Sequence[float]", ventana: int = VENTANA_CUARTILES_H
+) -> np.ndarray:
+    """Umbrales (p25, p50, p75) por hora con una ventana móvil **causal**.
+
+    El umbral de la hora ``t`` se calcula con los precios de ``t-ventana`` a ``t-1``: nunca
+    usa la hora actual ni el futuro. Las primeras ``ventana`` horas de la serie no tienen
+    historia suficiente y usan los cuartiles de esa primera ventana (las primeras 168 h del
+    entrenamiento), lo que solo afecta a la primera semana de entrenamiento.
+
+    Para validación/prueba se pasa la serie completa (entrenamiento + días siguientes) y se
+    recortan las filas correspondientes: así sus primeras horas usan la semana anterior.
+
+    Returns
+    -------
+    np.ndarray de forma ``(len(precios), 3)``.
+    """
+    p = np.asarray(precios, dtype=float).ravel()
+    if ventana < 1:
+        raise ValueError("ventana debe ser >= 1.")
+    if p.size <= ventana:
+        raise ValueError(f"Se necesitan más de {ventana} horas para la ventana móvil.")
+    # Fila j de `ventanas` = p[j : j+ventana]; la hora t = j+ventana usa la fila j.
+    ventanas = np.lib.stride_tricks.sliding_window_view(p, ventana)[:-1]
+    umbrales = np.empty((p.size, 3))
+    umbrales[ventana:] = np.quantile(ventanas, [0.25, 0.50, 0.75], axis=1).T
+    umbrales[:ventana] = np.quantile(p[:ventana], [0.25, 0.50, 0.75])
+    return umbrales
 
 
 class Accion(IntEnum):
@@ -67,9 +100,12 @@ class BatteryEnv:
         Energía que representa un nivel de SoC (capacidad_kwh / 4). Con 1.0
         la recompensa es exactamente ``±precio_actual``.
     umbrales_precio:
-        Umbrales (p25, p50, p75) para discretizar el precio. Si es ``None``
-        se calculan de ``precios``. Para un entorno de prueba, pasar los
-        umbrales del entorno de entrenamiento evita fuga de información.
+        Umbrales para discretizar el precio: 3 valores fijos (p25, p50, p75) o una
+        matriz ``(len(precios), 3)`` con los umbrales de cada hora (ventana móvil
+        causal, ver ``umbrales_moviles``). Si es ``None`` se calcula la ventana móvil
+        sobre ``precios``. Para validación/prueba conviene pasar las filas de
+        ``umbrales_moviles`` calculadas sobre la serie completa, para que las primeras
+        horas usen la semana anterior.
     aleatorio:
         Si es ``True``, ``reset()`` elige un día al azar (entrenamiento).
         Si es ``False``, recorre los días en orden (evaluación).
@@ -116,15 +152,30 @@ class BatteryEnv:
         self.aleatorio: bool = bool(aleatorio)
         self._rng = np.random.default_rng(semilla)
 
+        n_horas_total = precios_arr.size
         if umbrales_precio is None:
-            umbrales = np.quantile(precios_arr, [0.25, 0.50, 0.75])
+            if n_horas_total > VENTANA_CUARTILES_H:
+                umbrales = umbrales_moviles(precios_arr)
+            else:  # serie muy corta: cuartiles estáticos de la propia serie
+                umbrales = np.quantile(precios_arr, [0.25, 0.50, 0.75])
         else:
-            umbrales = np.asarray(umbrales_precio, dtype=float).ravel()
-            if umbrales.size != self.N_CUARTILES - 1 or np.any(np.diff(umbrales) < 0):
-                raise ValueError(
-                    "umbrales_precio debe tener 3 valores no decrecientes (p25, p50, p75)."
-                )
-        self.umbrales_precio: np.ndarray = umbrales
+            umbrales = np.asarray(umbrales_precio, dtype=float)
+        if umbrales.shape == (self.N_CUARTILES - 1,):
+            umbrales = np.broadcast_to(umbrales, (n_horas_total, self.N_CUARTILES - 1))
+        if umbrales.shape != (n_horas_total, self.N_CUARTILES - 1):
+            raise ValueError(
+                "umbrales_precio debe tener 3 valores (p25, p50, p75) o una fila de 3 "
+                f"valores por hora ({n_horas_total}, 3); se recibió {umbrales.shape}."
+            )
+        if not np.isfinite(umbrales).all() or np.any(np.diff(umbrales, axis=1) < 0):
+            raise ValueError("Los umbrales de precio deben ser finitos y no decrecientes.")
+        #: Umbrales por hora, forma (n_horas_total, 3).
+        self.umbrales_por_hora: np.ndarray = np.array(umbrales)
+        # Cuartil de cada hora precalculado, forma (n_dias, 24).
+        self.cuartiles_diarios: np.ndarray = np.array([
+            np.searchsorted(fila, precio, side="right")
+            for fila, precio in zip(self.umbrales_por_hora, precios_arr)
+        ], dtype=int).reshape(-1, self.N_HORAS)
 
         # Estado interno mutable.
         self._dia_siguiente: int = 0  # cursor para modo secuencial
@@ -141,15 +192,15 @@ class BatteryEnv:
         """Número de días (episodios distintos) disponibles."""
         return int(self.precios_diarios.shape[0])
 
-    def cuartil_precio(self, precio: float) -> int:
-        """Mapea un precio continuo a su cuartil discreto 0..3."""
-        return int(np.searchsorted(self.umbrales_precio, precio, side="right"))
+    def cuartil_precio(self, dia: int, hora: int) -> int:
+        """Cuartil discreto 0..3 del precio de ``(dia, hora)`` según su ventana causal."""
+        return int(self.cuartiles_diarios[dia, hora])
 
     def _precio_actual(self) -> float:
         return float(self.precios_diarios[self.dia_actual, self._hora])
 
     def _construir_estado(self) -> State:
-        return (self._hora, self.cuartil_precio(self._precio_actual()), self._soc)
+        return (self._hora, self.cuartil_precio(self.dia_actual, self._hora), self._soc)
 
     # ------------------------------------------------------------------ #
     # API del MDP
