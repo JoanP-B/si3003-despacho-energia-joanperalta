@@ -387,6 +387,62 @@ class RegulatoryAgent:
         return self.ultimo_resultado
 
 
+# --------------------------------------------------------------------------- #
+# Resumen ejecutivo (llamada independiente, sin herramientas ni memoria)
+# --------------------------------------------------------------------------- #
+PROMPT_RESUMEN = """Eres un analista financiero de energía. Analiza estos resultados de \
+despacho BESS y redacta un párrafo de 4 líneas explicando a la gerencia el desempeño de la \
+política Q-Learning frente a la Línea Base, justificando la eficiencia y el ahorro total en \
+COP.
+
+Reglas:
+- Usa solo las cifras del JSON, tal como vienen. No calcules cifras nuevas ni inventes datos.
+- Si Q-Learning ahorra menos que la Línea Base, dilo con claridad, sin suavizarlo.
+- Menciona la eficiencia de ida y vuelta y el periodo evaluado.
+- Escribe en español, en un solo párrafo de unas 4 líneas, sin títulos ni viñetas.
+- Cierra con una frase corta que aclare que es una simulación con precios de bolsa de XM y no \
+una recomendación de inversión."""
+
+
+def generar_resumen_ejecutivo(
+    datos: dict[str, Any],
+    modelo: str | None = None,
+    llm: BaseChatModel | None = None,
+    temperatura: float = 0.3,
+) -> str:
+    """Redacta con el LLM un resumen ejecutivo de una simulación.
+
+    ``datos`` son las cifras ya calculadas (``ResultadoSimulacion.resumen()``). Es una
+    llamada aparte: no usa herramientas ni toca la memoria de ``RegulatoryAgent``.
+
+    Raises
+    ------
+    ValueError
+        Si no hay datos.
+    AgentError
+        Si falta la configuración del proveedor o falla la llamada.
+    """
+    if not datos:
+        raise ValueError("No hay resultados para resumir.")
+    nombre = modelo or os.getenv("GROQ_MODEL", DEFAULT_MODEL)
+    cliente = llm or _crear_llm_groq(nombre, temperatura)
+    mensajes: list[BaseMessage] = [
+        SystemMessage(content=PROMPT_RESUMEN),
+        HumanMessage(
+            content="Resultados de la simulación (JSON):\n"
+            + json.dumps(datos, ensure_ascii=False, indent=1, default=str)
+        ),
+    ]
+    try:
+        respuesta = cliente.invoke(mensajes)
+    except Exception as exc:  # noqa: BLE001 - errores de red/HTTP del proveedor
+        raise AgentError(f"Error al consultar el modelo '{nombre}': {exc}") from exc
+    texto = _texto(respuesta) if isinstance(respuesta, BaseMessage) else str(respuesta).strip()
+    if not texto:
+        raise AgentError("El modelo no devolvió texto para el resumen.")
+    return texto
+
+
 def _main(argv: list[str]) -> int:
     pregunta = " ".join(argv) or "¿Qué regula la CREG sobre almacenamiento con baterías?"
     try:

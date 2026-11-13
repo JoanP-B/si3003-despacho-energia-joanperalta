@@ -5,6 +5,11 @@ Actualización clásica:
 
 Exploración Epsilon-Greedy con decaimiento lineal de epsilon a lo largo del
 entrenamiento. Sin librerías de alto nivel (ni Gymnasium ni Stable-Baselines).
+
+Tasa de aprendizaje: fija (``alpha``) o, si se da ``alpha_exponente = ω``, decreciente con
+las visitas de cada par (estado, acción): ``alpha(s,a) = 1 / n(s,a)^ω`` con ω en (0.5, 1].
+Esa regla cumple las condiciones de Robbins-Monro (Σα = ∞, Σα² < ∞), así cada Q(s,a)
+converge al promedio de sus recompensas ruidosas en lugar de seguir a los últimos días.
 """
 from __future__ import annotations
 
@@ -38,6 +43,9 @@ class QLearningAgent:
         linealmente de ``epsilon_inicial`` a ``epsilon_final``.
     semilla:
         Semilla del generador aleatorio para reproducibilidad.
+    alpha_exponente:
+        Si es ``None`` se usa ``alpha`` fijo. Si es ω en (0.5, 1], la tasa de cada par
+        (estado, acción) es ``1 / n(s,a)^ω`` y ``alpha`` se ignora.
     """
 
     def __init__(
@@ -49,7 +57,10 @@ class QLearningAgent:
         epsilon_final: float = 0.05,
         episodios_decaimiento: int = 500,
         semilla: int | None = 42,
+        alpha_exponente: float | None = None,
     ) -> None:
+        if alpha_exponente is not None and not (0.5 < alpha_exponente <= 1.0):
+            raise ValueError("alpha_exponente debe estar en (0.5, 1].")
         if n_acciones < 1:
             raise ValueError("n_acciones debe ser >= 1.")
         if not (0.0 < alpha <= 1.0):
@@ -70,8 +81,13 @@ class QLearningAgent:
         self.epsilon_final = float(epsilon_final)
         self.episodios_decaimiento = int(episodios_decaimiento)
         self.epsilon = float(epsilon_inicial)
+        self.alpha_exponente = None if alpha_exponente is None else float(alpha_exponente)
 
         self._rng = np.random.default_rng(semilla)
+        # Visitas por (estado, acción); solo se usan con alpha_exponente.
+        self.visitas: Dict[State, np.ndarray] = defaultdict(
+            lambda: np.zeros(self.n_acciones, dtype=float)
+        )
         # Información de contexto guardada junto a la Q-Table (ver ``guardar``).
         self.metadatos: dict = {}
 
@@ -118,7 +134,14 @@ class QLearningAgent:
         q_sa = self.q_table[estado][accion]
         max_q_sig = 0.0 if terminado else float(self.q_table[estado_sig].max())
         objetivo = recompensa + self.gamma * max_q_sig
-        self.q_table[estado][accion] = q_sa + self.alpha * (objetivo - q_sa)
+        self.q_table[estado][accion] = q_sa + self.tasa(estado, accion) * (objetivo - q_sa)
+
+    def tasa(self, estado: State, accion: int) -> float:
+        """Tasa de aprendizaje de este paso (y registra la visita si es decreciente)."""
+        if self.alpha_exponente is None:
+            return self.alpha
+        self.visitas[estado][accion] += 1
+        return float(self.visitas[estado][accion] ** -self.alpha_exponente)
 
     def decaer_epsilon(self, episodio: int) -> None:
         """Decaimiento lineal de epsilon según el episodio actual (0-indexado)."""
@@ -175,6 +198,7 @@ class QLearningAgent:
             "epsilon_final": self.epsilon_final,
             "episodios_decaimiento": self.episodios_decaimiento,
             "epsilon": self.epsilon,
+            "alpha_exponente": self.alpha_exponente,
             "metadatos": metadatos or {},
             "q_table": {
                 ",".join(map(str, estado)): valores.tolist()
@@ -200,6 +224,7 @@ class QLearningAgent:
                 epsilon_final=datos["epsilon_final"],
                 episodios_decaimiento=datos["episodios_decaimiento"],
                 semilla=semilla,
+                alpha_exponente=datos.get("alpha_exponente"),
             )
             agente.epsilon = float(datos["epsilon"])
             agente.metadatos = dict(datos.get("metadatos") or {})

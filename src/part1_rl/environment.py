@@ -25,7 +25,7 @@ Acciones:
 
 Recompensa (flujo de caja neto en COP, costo evitado):
     CARGAR    -> -precio_actual * energia_por_nivel_kwh  (compra a la red)
-    DESCARGAR -> +precio_actual * energia_por_nivel_kwh  (costo evitado)
+    DESCARGAR -> +precio_actual * energia_por_nivel_kwh * eficiencia  (costo evitado)
     MANTENER  ->  0
     acción física inválida -> penalizacion_invalida (-1000), estado sin cambio
 """
@@ -106,11 +106,21 @@ class BatteryEnv:
         sobre ``precios``. Para validación/prueba conviene pasar las filas de
         ``umbrales_moviles`` calculadas sobre la serie completa, para que las primeras
         horas usen la semana anterior.
+    gamma_shaping:
+        Si se da (normalmente el mismo γ del agente), la recompensa de entrenamiento
+        incluye *reward shaping* basado en potencial (ver ``_shaping``). No cambia
+        ``info["flujo_caja_cop"]``, que es lo que mide el ahorro. Solo para entrenar.
     aleatorio:
         Si es ``True``, ``reset()`` elige un día al azar (entrenamiento).
         Si es ``False``, recorre los días en orden (evaluación).
     semilla:
         Semilla del generador aleatorio.
+    eficiencia:
+        Eficiencia de ida y vuelta del BESS, en (0, 1]. De cada kWh comprado a la red
+        solo se entregan ``eficiencia`` kWh al descargar, así que el costo evitado de
+        una descarga es ``eficiencia · precio · kWh``. La compra se paga completa: las
+        pérdidas están en la energía, no en el precio. Con 1.0 (por defecto) la batería
+        es ideal.
     """
 
     N_ACCIONES: int = 3
@@ -127,7 +137,15 @@ class BatteryEnv:
         umbrales_precio: "Sequence[float] | None" = None,
         aleatorio: bool = True,
         semilla: int | None = None,
+        gamma_shaping: float | None = None,
+        eficiencia: float = 1.0,
     ) -> None:
+        if gamma_shaping is not None and not (0.0 <= gamma_shaping <= 1.0):
+            raise ValueError("gamma_shaping debe estar en [0, 1].")
+        if not (0.0 < eficiencia <= 1.0):
+            raise ValueError("eficiencia debe estar en (0, 1].")
+        self.gamma_shaping = None if gamma_shaping is None else float(gamma_shaping)
+        self.eficiencia = float(eficiencia)
         precios_arr = np.asarray(precios, dtype=float).ravel()
         if precios_arr.size == 0 or precios_arr.size % self.N_HORAS != 0:
             raise ValueError(
@@ -199,6 +217,21 @@ class BatteryEnv:
     def _precio_actual(self) -> float:
         return float(self.precios_diarios[self.dia_actual, self._hora])
 
+    def _shaping(self, soc_previo: int, dia_hora: Tuple[int, int], terminado: bool) -> float:
+        """Término ``γ·Φ(s') − Φ(s)`` con ``Φ = SoC · energía · p50`` de la hora actual.
+
+        La energía guardada se valora a la mediana causal del precio (ventana de 168 h).
+        Así cargar por debajo de la mediana o descargar por encima da recompensa positiva
+        inmediata. Al terminar el día ``Φ(s') = 0``: la energía sobrante cuenta como gasto.
+        """
+        dia, hora = dia_hora
+        p50 = float(self.umbrales_por_hora[dia * self.N_HORAS + hora, 1])
+        # Un escalón guardado vale lo que evita al descargarse: eficiencia · kWh · p50.
+        valor = self.energia_por_nivel_kwh * self.eficiencia * p50
+        phi_previo = soc_previo * valor
+        phi_nuevo = 0.0 if terminado else self._soc * valor
+        return self.gamma_shaping * phi_nuevo - phi_previo
+
     def _construir_estado(self) -> State:
         return (self._hora, self.cuartil_precio(self.dia_actual, self._hora), self._soc)
 
@@ -244,6 +277,7 @@ class BatteryEnv:
 
         precio = self._precio_actual()
         hora = self._hora
+        soc_previo = self._soc
         monto = precio * self.energia_por_nivel_kwh
         valida = True
         flujo_caja = 0.0
@@ -259,10 +293,13 @@ class BatteryEnv:
                 valida = False
             else:
                 self._soc -= 1
-                flujo_caja = +monto  # costo evitado
+                flujo_caja = +monto * self.eficiencia  # costo evitado (energía entregada)
         # MANTENER: flujo_caja = 0
 
         recompensa = flujo_caja if valida else self.penalizacion_invalida
+        if self.gamma_shaping is not None:
+            recompensa += self._shaping(soc_previo, dia_hora=(self.dia_actual, hora),
+                                        terminado=hora + 1 >= self.N_HORAS)
 
         self._hora += 1
         terminado = self._hora >= self.N_HORAS

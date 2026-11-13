@@ -43,12 +43,18 @@ class ModeloEmpirico:
 
 @dataclass
 class PoliticaReferencia:
-    """Política greedy respecto a V*; ``accion(estado)`` es compatible con el entorno."""
+    """Política greedy respecto a V*; ``accion(estado)`` es compatible con el entorno.
+
+    Si guarda el ``modelo`` empírico, se puede volver a resolver para otra eficiencia de
+    la batería con ``replanificar`` (milisegundos): la referencia conoce el modelo.
+    """
 
     politica: np.ndarray  # (24, 4, 5) de enteros 0..2
     valores: np.ndarray  # (24, 4, 5) V*
     iteraciones: int
     gamma: float
+    modelo: ModeloEmpirico | None = None
+    eficiencia: float = 1.0
 
     def accion(self, estado: State) -> int:
         h, q, s = estado
@@ -56,16 +62,32 @@ class PoliticaReferencia:
 
     __call__ = accion
 
+    def replanificar(self, eficiencia: float,
+                     penalizacion_invalida: float = -1000.0) -> "PoliticaReferencia":
+        """Resuelve de nuevo el MDP con otra eficiencia. Sin modelo guardado, no cambia."""
+        if self.modelo is None or np.isclose(eficiencia, self.eficiencia):
+            return self
+        return iterar_valores(self.modelo, 1.0, self.gamma, penalizacion_invalida,
+                              eficiencia=eficiencia)
+
     def guardar(self, ruta: str | Path, metadatos: dict | None = None) -> Path:
         ruta = Path(ruta)
         ruta.parent.mkdir(parents=True, exist_ok=True)
         datos = {
             "gamma": self.gamma,
             "iteraciones": self.iteraciones,
+            "eficiencia": self.eficiencia,
             "metadatos": metadatos or {},
             "politica": self.politica.tolist(),
             "valores": np.round(self.valores, 4).tolist(),
         }
+        if self.modelo is not None:
+            # Sin redondeo: replanificar desde el JSON debe dar la misma política que en memoria.
+            datos["modelo"] = {
+                "precio_medio": self.modelo.precio_medio.tolist(),
+                "transicion": self.modelo.transicion.tolist(),
+                "conteos": self.modelo.conteos.tolist(),
+            }
         ruta.write_text(json.dumps(datos), encoding="utf-8")
         return ruta
 
@@ -82,7 +104,19 @@ class PoliticaReferencia:
                 raise ValueError("forma inválida")
             if politica.min() < 0 or politica.max() >= N_A:
                 raise ValueError("acción fuera de rango")
-            return cls(politica, valores, int(datos["iteraciones"]), float(datos["gamma"]))
+            modelo = None
+            if "modelo" in datos:
+                m = datos["modelo"]
+                modelo = ModeloEmpirico(
+                    np.asarray(m["precio_medio"], dtype=float),
+                    np.asarray(m["transicion"], dtype=float),
+                    np.asarray(m["conteos"], dtype=float),
+                )
+                if (modelo.precio_medio.shape != (N_H, N_Q)
+                        or modelo.transicion.shape != (N_H - 1, N_Q, N_Q)):
+                    raise ValueError("modelo con forma inválida")
+            return cls(politica, valores, int(datos["iteraciones"]), float(datos["gamma"]),
+                       modelo, float(datos.get("eficiencia", 1.0)))
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError(f"Archivo de política de referencia inválido: {ruta} ({exc})") from exc
 
@@ -130,10 +164,17 @@ def iterar_valores(
     penalizacion_invalida: float = -1000.0,
     tol: float = 1e-9,
     max_iter: int = 1000,
+    eficiencia: float = 1.0,
 ) -> PoliticaReferencia:
-    """Iteración de valores tabular sobre el modelo empírico."""
+    """Iteración de valores tabular sobre el modelo empírico.
+
+    ``eficiencia`` (ida y vuelta, en (0, 1]) multiplica el costo evitado de descargar,
+    igual que en ``BatteryEnv``.
+    """
     if not (0.0 <= gamma <= 1.0):
         raise ValueError("gamma debe estar en [0, 1].")
+    if not (0.0 < eficiencia <= 1.0):
+        raise ValueError("eficiencia debe estar en (0, 1].")
     s = np.arange(N_S)
     s_cargar = np.minimum(s + 1, N_S - 1)
     s_descargar = np.maximum(s - 1, 0)
@@ -153,7 +194,8 @@ def iterar_valores(
             penalizacion_invalida + gamma * futuro,
         )
         Qsa[..., Accion.DESCARGAR] = np.where(
-            valida_descargar, monto[..., None] + gamma * futuro[..., s_descargar],
+            valida_descargar,
+            eficiencia * monto[..., None] + gamma * futuro[..., s_descargar],
             penalizacion_invalida + gamma * futuro,
         )
         V_nuevo = Qsa.max(axis=-1)
@@ -162,7 +204,7 @@ def iterar_valores(
         if delta < tol:
             break
     politica = Qsa.argmax(axis=-1)  # empate -> menor índice (MANTENER)
-    return PoliticaReferencia(politica.astype(int), V, it, float(gamma))
+    return PoliticaReferencia(politica.astype(int), V, it, float(gamma), modelo, float(eficiencia))
 
 
 def value_iteration_policy(
@@ -172,7 +214,9 @@ def value_iteration_policy(
     gamma: float = 0.99,
     penalizacion_invalida: float = -1000.0,
     tol: float = 1e-9,
+    eficiencia: float = 1.0,
 ) -> PoliticaReferencia:
     """Estima el modelo empírico con los días de entrenamiento y lo resuelve con VI."""
     modelo = estimar_modelo(precios_train, umbrales_precio)
-    return iterar_valores(modelo, energia_por_nivel_kwh, gamma, penalizacion_invalida, tol)
+    return iterar_valores(modelo, energia_por_nivel_kwh, gamma, penalizacion_invalida, tol,
+                          eficiencia=eficiencia)

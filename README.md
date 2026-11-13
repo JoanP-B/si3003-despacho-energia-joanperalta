@@ -62,7 +62,9 @@ Implementado desde cero en Python, sin Gymnasium ni Stable-Baselines (`src/part1
 | Transición | Determinista en hora y SoC. Cargar al 100 % o descargar al 0 % se invalida y no cambia el estado |
 | Recompensa | Cargar: `-precio·kWh`; Descargar: `+precio·kWh` (costo evitado); Mantener: `0`; acción inválida: `-1000` |
 | Episodio | Un día real del historial (24 pasos de 1 hora); la batería arranca vacía |
-| Q-Learning | `Q(s,a) ← Q(s,a) + α[R + γ·max Q(s',·) − Q(s,a)]`, ε-greedy con decaimiento lineal |
+| Q-Learning | `Q(s,a) ← Q(s,a) + α(s,a)[R' + γ·max Q(s',·) − Q(s,a)]`, ε-greedy con decaimiento lineal |
+| *Reward shaping* (solo entrenamiento) | `R' = R + γ·Φ(s') − Φ(s)` con `Φ = SoC · kWh por escalón · p50_t` (mediana de la ventana móvil) y `Φ = 0` al terminar el día. Cargar por debajo de la mediana o descargar por encima da recompensa positiva inmediata |
+| Tasa de aprendizaje | `α(s,a) = 1 / n(s,a)^ω`, decrece con las visitas de cada par (estado, acción) |
 | Línea Base justa | Carga en las horas 01-04 y descarga en las 18-21 (usa los 4 escalones), sin mirar el precio |
 | Política de referencia | **Iteración de Valores** sobre el modelo empírico del entrenamiento: precio medio por (hora, cuartil) y probabilidades de transición entre cuartiles de horas consecutivas (`src/part1_rl/value_iteration.py`) |
 | Cota superior | Óptimo con información perfecta (programación dinámica conociendo los 24 precios del día). No es implementable; solo sirve como techo |
@@ -72,11 +74,33 @@ Protocolo experimental (`notebooks/02_mdp_rl.ipynb`):
 - **Datos:** 365 días reales de `PrecBolsNaci` (2025-11-10 a 2026-11-09).
 - **División cronológica 70 / 15 / 15:** entrenamiento 255 días (hasta 2026-07-22), validación
   55 días (2026-07-23 a 2026-09-15) y prueba 55 días (2026-09-16 a 2026-11-09).
-- **Selección de hiperparámetros solo con validación:** rejilla α ∈ {0.05, 0.1, 0.3, 0.5, 0.7,
-  0.9} × decaimiento de ε en el 50 % u 80 % de los episodios, 5 semillas por combinación,
-  5,000 episodios cada una (60 entrenamientos). Ganó α = 0.3 con decaimiento en el 80 %.
-- **Entrenamiento final:** 5,000 episodios, γ = 0.99, ε de 1.0 a 0.05, semilla 42.
+- **Selección de hiperparámetros solo con validación:** rejilla ω ∈ {0.6, 0.7, 0.8, 1.0} ×
+  decaimiento de ε en el 50 % u 80 % de los episodios, 5 semillas por combinación, 5,000
+  episodios cada una (40 entrenamientos). Ganó ω = 0.7 con decaimiento en el 50 %.
+- **Entrenamiento final (escenario base):** 5,000 episodios, γ = 0.99, ε de 1.0 a 0.05,
+  semilla 42.
+- **Escenarios por presupuesto:** el mismo diseño entrenado con 100 (corto), 5,000 (base) y
+  50,000 (largo) episodios, para ver cuánto mejora con más entrenamiento.
 - **Métricas finales:** solo sobre los días de prueba, que no se usaron para decidir nada.
+
+#### Por qué cambió el diseño de Q-Learning
+
+La primera versión usaba α = 0.3 fijo y la recompensa era solo el flujo de caja. Con ese diseño
+Q-Learning ahorraba un 57.6 % menos que la Línea Base. Había dos causas:
+
+1. **La recompensa llegaba tarde.** Cargar de madrugada cuesta de inmediato, y la recompensa de
+   descargar llega 15 a 18 horas después. Q-Learning la propaga hacia atrás un paso por
+   episodio, a través de cuartiles que cambian al azar, así que aprendía primero que "cargar
+   cuesta". El *reward shaping* basado en potencial (Ng, Harada y Russell, 1999) le da esa
+   información en el mismo paso, sin cambiar la métrica: el ahorro se sigue midiendo con el
+   flujo de caja real.
+2. **α fijo con recompensas ruidosas.** Con α = 0.3, cada Q(s,a) era casi un promedio de los
+   últimos 3 o 4 días: no convergía y el `max` volvía ese ruido una sobreestimación. Con
+   `α = 1/n^ω` se cumplen las condiciones de convergencia de Robbins-Monro.
+
+Matiz: la garantía formal del *shaping* exige que Φ dependa solo del estado; aquí depende
+también de la mediana móvil `p50_t`, que el estado resume con el cuartil. Por eso es una
+aproximación.
 
 ### Parte 2: copiloto regulatorio y operativo (LLM + RAG + herramientas)
 
@@ -101,17 +125,46 @@ Protocolo experimental (`notebooks/02_mdp_rl.ipynb`):
 
 ### Dashboard
 
-Aplicación Streamlit (`src/dashboard/app.py`) conectada a `simular()`:
+Aplicación Streamlit (`src/dashboard/app.py`) conectada a `simular()`, con tema oscuro
+(`.streamlit/config.toml`), tarjetas blancas y gráficas Plotly con plantilla `plotly_white`:
 
-- **Controles:** capacidad de la batería (10 a 1000 kWh) y rango de fechas, limitado al periodo
-  de prueba.
+- **Barra lateral:**
+  - *Parámetros de simulación:* capacidad de la batería (10 a 1000 kWh), **eficiencia del
+    sistema** (70 % a 100 %, por defecto 90 %), **potencia del inversor** (10 % a 100 % de la
+    capacidad, en kW), escenario de entrenamiento (corto, base o largo), periodo (prueba o
+    validación) y rango de fechas.
+  - *Notas del modelo* y estado del *Copiloto*.
 - **Tarjetas:** ahorro en COP de Q-Learning, Línea Base justa e Iteración de Valores, con la
   diferencia porcentual frente a la Línea Base.
-- **Gráfica 1:** precio real de bolsa (COP/kWh) con marcadores de cuándo Q-Learning cargó y
-  descargó, y debajo el nivel de la batería (SoC).
-- **Gráfica 2:** ahorro acumulado de las tres políticas en el rango elegido.
-- **Chat** con el copiloto en la misma vista, con un desplegable que muestra qué herramientas
-  usó en cada respuesta y qué devolvieron.
+- **Pestaña "Análisis Operativo y Gráficas"**, con una sección por gráfica:
+  - *Precio y operación:* arriba solo el precio de bolsa de XM; abajo el nivel de la batería
+    (SoC) con triángulos verdes donde Q-Learning cargó y rojos donde descargó. Abre en la
+    primera semana del rango, con botones de 1, 7 y 14 días.
+  - *Ahorro acumulado:* las tres políticas al cierre de cada día.
+  - *Escenarios de entrenamiento:* Q-Learning en los tres escenarios frente a la Línea Base y
+    la Iteración de Valores, y la curva de aprendizaje (ahorro según los episodios).
+  - *Resumen ejecutivo para gerencia:* un botón envía las cifras de la simulación al LLM
+    (Groq), que redacta un párrafo sin calcular ni cambiar los números
+    (`generar_resumen_ejecutivo` en `src/agent/llm_agent.py`). Es una llamada aparte que no
+    toca la memoria del chat.
+- **Pestaña "Copiloto Regulatorio e Interacción":** chat con preguntas sugeridas que se envían
+  con un clic, y un desplegable en cada respuesta con las herramientas usadas y lo que
+  devolvieron. El copiloto simula siempre con el escenario base, los días de prueba y una
+  batería ideal (eficiencia 100 %, sin límite de inversor).
+
+#### Eficiencia e inversor: cómo se modelan
+
+- **Eficiencia de ida y vuelta η:** de cada kWh comprado a la red, la batería solo entrega η
+  kWh al descargar. Por eso η multiplica el **costo evitado de cada descarga**, y las compras
+  se pagan completas. No se multiplica el ahorro neto por η: eso también abarataría la energía
+  comprada, y una pérdida se vería más pequeña. Con η = 90 % un ciclo solo es rentable si el
+  precio de descarga supera en un 11 % al de carga.
+- **Políticas con la eficiencia elegida:** cada escenario de Q-Learning se entrenó con cada
+  eficiencia de la grilla (70 %, 75 %, …, 100 %); la Iteración de Valores se replanifica con
+  su modelo empírico; la Línea Base mantiene su regla.
+- **Potencia del inversor:** limita la energía de cada hora. El modelo mueve un escalón
+  (capacidad / 4) por hora, así que un inversor menor que capacidad / 4 kW reduce la energía
+  de cada carga y descarga, y uno mayor no cambia el resultado.
 
 ## 3. Datos
 
@@ -142,9 +195,12 @@ Aplicación Streamlit (`src/dashboard/app.py`) conectada a `simular()`:
 │   ├── raw/
 │   │   └── xm_precio_bolsa.csv         # respaldo de XM (plan B), 365 días
 │   └── processed/
-│       ├── q_table.json                # Q-Table entrenada y metadatos
-│       ├── politica_referencia.json    # política de Iteración de Valores
+│       ├── q_table.json                # Q-Table del escenario base (5,000 ep., batería ideal)
+│       ├── escenarios/                 # q_{corto,base,largo}_eta{70..100}.json
+│       ├── curva_aprendizaje.csv       # ahorro según episodios y eficiencia
+│       ├── politica_referencia.json    # Iteración de Valores y su modelo empírico
 │       ├── precios_evaluacion.csv      # días de prueba + umbrales causales por hora
+│       ├── precios_validacion.csv      # días de validación + umbrales causales por hora
 │       └── faiss_index/                # índice vectorial (se genera; ignorado por git)
 ├── docs/
 │   ├── Informe Final.pdf               # informe del proyecto
@@ -170,8 +226,8 @@ Aplicación Streamlit (`src/dashboard/app.py`) conectada a `simular()`:
 └── README.md
 ```
 
-Los artefactos de la Parte 1 (`q_table.json`, `politica_referencia.json`,
-`precios_evaluacion.csv`) están versionados para que el dashboard abra sin reentrenar. El
+Los artefactos de la Parte 1 (las tres Q-Tables, `politica_referencia.json` y los dos CSV de
+precios) están versionados para que el dashboard abra sin reentrenar. El
 índice FAISS no se versiona porque se serializa con pickle; se construye en el paso 4.
 
 ## 5. Configuración y ejecución
@@ -253,17 +309,21 @@ resoluciones (330 fragmentos).
 ### Paso 5. (Opcional) Reentrenar la Parte 1
 
 No es necesario para usar el dashboard: los artefactos ya están en `data/processed/`. Para
-reproducir los resultados desde cero (unos 3 minutos; intenta la API de XM y, si falla, usa
-`data/raw/xm_precio_bolsa.csv`):
+reproducir los resultados desde cero (unos 10 minutos):
 
 ```bash
-python -m nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=1500 notebooks/02_mdp_rl.ipynb
+python -m nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=3000 notebooks/02_mdp_rl.ipynb
 ```
 
-También se puede abrir con `jupyter notebook notebooks/02_mdp_rl.ipynb` y ejecutar todas las
-celdas. El notebook regenera `q_table.json`, `politica_referencia.json` y
-`precios_evaluacion.csv`, y al final comprueba con `assert` que `simular()` da las mismas
-cifras que el notebook.
+- Por defecto el notebook lee el respaldo versionado `data/raw/xm_precio_bolsa.csv`, así las
+  cifras salen idénticas a las de este README. XM revisa los precios de días recientes (por
+  ejemplo, una nueva descarga cambió las 24 horas del 2026-11-08), así que con
+  `ACTUALIZAR_DESDE_API = True` el notebook descarga de nuevo y las cifras pueden variar un poco.
+- También se puede abrir con `jupyter notebook notebooks/02_mdp_rl.ipynb` y ejecutar todas las
+  celdas.
+- El notebook regenera todos los artefactos de `data/processed/` y comprueba con `assert` que
+  `simular()` da las mismas cifras que el notebook (batería ideal y escenarios con eficiencia
+  90 %).
 
 ### Paso 6. Configurar la API key de Groq
 
@@ -342,18 +402,61 @@ revócala en **API Keys** y genera una nueva.
 ### Parte 1: Línea Base vs. Q-Learning vs. Iteración de Valores
 
 Resultado sobre los **55 días de prueba** (2026-09-16 a 2026-11-09) con precios reales de XM y
-una batería de 4 kWh (1 kWh por escalón). Ninguno de estos días se usó para entrenar ni para
+una batería ideal de 4 kWh (1 kWh por escalón, eficiencia 100 %). Ninguno de estos días se usó para entrenar ni para
 elegir hiperparámetros.
 
 | Política | Ahorro acumulado | Cargas / Descargas | Inválidas | % de la cota superior | vs. Línea Base |
 |---|---|---|---|---|---|
 | Línea Base justa (01-04 h / 18-21 h) | 89,338 COP | 220 / 220 | 0 | 81.6 % | — |
-| Q-Learning (α = 0.3, 5,000 episodios) | 37,854 COP | 152 / 152 | 0 | 34.6 % | −57.6 % |
+| Q-Learning, diseño anterior (α = 0.3 fijo, sin *shaping*) | 37,854 COP | 152 / 152 | 0 | 34.6 % | −57.6 % |
+| **Q-Learning, diseño nuevo** (*shaping* + α = 1/n^0.7, 5,000 ep.) | **82,222 COP** | 392 / 392 | 0 | 75.1 % | −8.0 % |
 | Iteración de Valores (referencia) | **95,134 COP** | 415 / 415 | 0 | 86.8 % | **+6.5 %** |
 | Cota superior con información perfecta | 109,546 COP | — | — | 100 % | — |
 
+Con el diseño nuevo, Q-Learning **duplica su ahorro en prueba** (de 37,854 a 82,222 COP) y pasa
+del 39.8 % al 86.4 % de la referencia. Con 5 semillas obtiene 84,994 ± 4,602 COP (antes
+42,944 ± 13,169): además de ahorrar más, varía tres veces menos.
+
+**En validación** (55 días, 2026-07-23 a 2026-09-15; promedio de 5 semillas):
+
+| Política | Ahorro | vs. Línea Base |
+|---|---|---|
+| Línea Base justa | 38,598 COP | — |
+| Q-Learning, diseño anterior | 23,550 ± 8,511 COP | −39.0 % |
+| **Q-Learning, diseño nuevo** | **49,322 ± 1,345 COP** | **+27.8 %** |
+| Iteración de Valores | 50,409 COP | +30.6 % |
+
+**Escenarios por presupuesto de entrenamiento** (diseño nuevo, semilla 42, batería ideal):
+
+| Escenario | Episodios | Validación | vs. Línea Base | Prueba | vs. Línea Base |
+|---|---|---|---|---|---|
+| Corto | 50 | 9,685 COP | −74.9 % | 39,528 COP | −55.8 % |
+| **Base** (el que usan la app y el agente) | 5,000 | 46,525 COP | **+20.5 %** | 82,222 COP | −8.0 % |
+| Largo | 50,000 | 53,048 COP | **+37.4 %** | 86,467 COP | −3.2 % |
+
+**Los mismos escenarios con eficiencia de ida y vuelta de 90 %** (cada uno entrenado con esa
+eficiencia; Línea Base: 16,450 en validación y 70,077 en prueba; Iteración de Valores
+replanificada: 26,117 y 73,376):
+
+| Escenario | Validación | vs. Línea Base | Prueba | vs. Línea Base |
+|---|---|---|---|---|
+| Corto | −19,923 COP | −221.1 % | 19,413 COP | −72.3 % |
+| Base | 19,525 COP | **+18.7 %** | 62,696 COP | −10.5 % |
+| Largo | 31,944 COP | **+94.2 %** | 62,588 COP | −10.7 % |
+
+Con pérdidas, un ciclo con poca diferencia de precio deja de ser rentable, así que el
+entrenamiento importa más: con 50 episodios el agente pierde dinero en validación. En prueba,
+el escenario largo no mejora al base.
+
+La curva completa (50, 300, 1,000, 2,000, 5,000, 20,000 y 50,000 episodios, para cada
+eficiencia de 70 % a 100 %) está en la sección 6 del notebook y en
+`data/processed/curva_aprendizaje.csv`. No es monótona: con una sola semilla hay altibajos
+entre presupuestos.
+
 Las cifras escalan de forma lineal con la capacidad, porque las políticas no dependen de ella:
-con 100 kWh son 946,350 / 2,233,455 / 2,378,354 COP.
+con 100 kWh, en prueba y con batería ideal, son 2,055,557 (Q-Learning) / 2,233,455 (Línea
+Base) / 2,378,354 (Iteración de Valores) COP. El dashboard abre con eficiencia 90 %, así que
+muestra 1,567,388 / 1,751,928 / 1,834,406 COP.
 
 Interpretación:
 
@@ -364,14 +467,20 @@ Interpretación:
   precios de septiembre a noviembre (más altos) caían casi siempre en los cuartiles superiores
   y la Iteración de Valores quedaba por debajo de la Línea Base (85,919 COP, −3.8 %). Con la
   ventana móvil los umbrales al inicio de la prueba pasan de 154/266/432 a 425/492/591 COP/kWh.
-- **Q-Learning no converge con 5,000 episodios.** Logra el 39.8 % del ahorro de la referencia y
-  queda por debajo de la Línea Base. Con 5 semillas obtiene 42,944 ± 13,169 COP en prueba. En
-  una prueba exploratoria solo sobre validación, 50,000 episodios con α = 0.1 subieron su
-  promedio de 22,442 a 32,853 COP, todavía por debajo de la Línea Base (38,598) y de la
-  referencia (50,409). La causa probable es la varianza de las transiciones entre cuartiles
-  con α constante y solo 255 días de entrenamiento.
-- **La Línea Base justa es una línea base exigente.** Acierta el patrón diario del precio de
-  bolsa (barato de madrugada, caro en la noche) y captura el 81.6 % del óptimo.
+- **El problema de Q-Learning era de diseño, no de iteraciones.** Con el diseño anterior, 10
+  veces más episodios (50,000 con α = 0.1) solo subían su promedio en validación de 22,442 a
+  32,853 COP. Con *shaping* y α decreciente, con los mismos 5,000 episodios, llega a 49,322.
+- **Con más entrenamiento Q-Learning se acerca al techo del MDP.** En validación el escenario
+  largo (53,048) alcanza e incluso supera a la Iteración de Valores (50,409), que usa un modelo
+  aproximado. En prueba la mejora es menor (de −8.0 % a −3.2 % frente a la Línea Base).
+- **En los días de prueba la Línea Base es muy difícil de superar.** Acierta el patrón diario
+  del precio de bolsa (barato de madrugada, caro en la noche) y captura el 81.6 % del óptimo.
+  Solo la Iteración de Valores le gana (+6.5 %). Q-Learning le gana en validación pero no en
+  prueba, y así se reporta.
+- **Más datos antiguos no ayudan.** En una prueba exploratoria, entrenar con 2022 a 2026
+  (1,664 días, incluye el periodo de El Niño) empeoró tanto a la Iteración de Valores
+  (43,995 en validación) como a Q-Learning. El comportamiento reciente del mercado es más
+  informativo que años con otro régimen de precios.
 
 ### Parte 2: batería de QA automatizada del agente
 
@@ -387,7 +496,9 @@ deterministas (no se usa un LLM como juez):
 - Las preguntas trampa deben rechazarse sin inventar datos ni cambiar los valores del usuario.
 - Ningún caso puede agotar el límite de iteraciones.
 
-Resultado de la última ejecución (2026-11-13, commit `b72d532`, artefactos con precios de XM):
+Resultado de la última ejecución (2026-11-13 02:42, con el diseño nuevo de Q-Learning y
+precios de XM; el reporte muestra el commit `d7b175a` porque se generó antes de commitear estos
+cambios):
 
 | Categoría | Casos | Aprobados |
 |---|---|---|
@@ -399,32 +510,40 @@ Resultado de la última ejecución (2026-11-13, commit `b72d532`, artefactos con
 
 Fallos documentados:
 
-- **S3 (1000 kWh):** la herramienta y la cifra de Q-Learning fueron correctas, pero la
-  respuesta omitió el ahorro de la Línea Base.
-- **C2 (300 kWh + excedentes):** las citas de la CREG 174 fueron correctas, pero la respuesta
-  tampoco incluyó la cifra de la Línea Base.
+- **S3 ("¿Cuánto ahorraría el agente de RL con 1000 kWh?"):** la herramienta y la cifra de
+  Q-Learning fueron correctas, pero la respuesta omitió el ahorro de la Línea Base. La pregunta
+  solo pide el del agente, así que el criterio es estricto.
+- **C2 (300 kWh + excedentes):** las cifras de las tres políticas fueron exactas y el RAG
+  recuperó la CREG 174, pero el LLM citó con marcadores `【1】` en lugar del formato
+  `(Fuente: archivo, página N)`, así que la cita no se pudo verificar.
 
-En ambos fallos el LLM resumió de más; ninguna cifra reportada fue incorrecta. Los criterios
-comprueban que cada cita exista entre los fragmentos recuperados, no que la afirmación sea
-correcta. El resultado corresponde a una sola ejecución con temperatura 0.2 y puede variar
-entre corridas: en la ejecución anterior, con precios simulados, fallaron R1 y C1 en lugar de
-S3 y C2.
+Ninguna cifra reportada fue incorrecta. Los criterios comprueban que cada cita exista entre los
+fragmentos recuperados, no que la afirmación sea correcta. El resultado corresponde a una sola
+ejecución con temperatura 0.2 y puede variar entre corridas: en ejecuciones anteriores fallaron
+R1 y C1, o S3 y C2 por omitir la Línea Base.
 
 ## 7. Limitaciones
 
 - El sistema es una herramienta analítica y educativa; **no** constituye asesoría
   regulatoria, legal ni financiera.
-- **Q-Learning no supera a la Línea Base** en los días de prueba (ver sección 6). La política
-  recomendable con estos datos es la de Iteración de Valores.
+- **Q-Learning supera a la Línea Base en validación (+20.5 %) pero no en prueba (−8.0 %)**
+  (ver sección 6). La política recomendable con estos datos es la de Iteración de Valores.
+- **Reward shaping aproximado:** el potencial depende de la mediana móvil del precio, que no es
+  parte exacta del estado, así que la garantía teórica de que no cambia la política óptima es
+  aproximada.
 - **Precio de bolsa, no tarifa:** el ahorro se calcula con el precio de bolsa nacional. Un
   usuario regulado paga una tarifa que incluye transmisión, distribución, comercialización y
   otros cargos, así que el ahorro real sería distinto.
 - **Volatilidad del mercado:** las políticas aprenden de un periodo de 255 días. Choques como
   El Niño, el nivel de los embalses, fallas de transmisión o intervenciones de la CREG pueden
   hacer que dejen de ser buenas. La ventana móvil reduce, pero no elimina, este problema.
-- **Modelo de batería simplificado:** 5 niveles de carga, sin pérdidas de eficiencia ni
-  degradación, un solo escalón de carga o descarga por hora y batería vacía al inicio de cada
-  día.
+- **Modelo de batería simplificado:** 5 niveles de carga, un solo escalón de carga o descarga
+  por hora y batería vacía al inicio de cada día. La eficiencia es una sola cifra de ida y
+  vuelta (no depende de la potencia ni de la temperatura) y no hay degradación.
+- **Inversor:** con un inversor menor que capacidad / 4 kW, cada escalón mueve menos energía y
+  se aprovecha solo parte de la capacidad; un controlador real podría cargar durante más horas.
+- **Resultados oficiales con batería ideal:** las tablas de la sección 6 y la QA usan
+  eficiencia 100 %. Las cifras con otras eficiencias son de los escenarios del dashboard.
 - **Evaluación de un solo periodo:** la prueba cubre 55 días de septiembre a noviembre de 2026.
 - **RAG limitado:** el corpus tiene dos resoluciones (una de ellas derogada), el modelo de
   embeddings está entrenado principalmente en inglés y solo se recuperan 3 fragmentos por

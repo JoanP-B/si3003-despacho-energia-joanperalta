@@ -85,6 +85,13 @@ lo ejecutó en su entorno local y decidió qué cambios se integraban.
   cuartiles fijos del entrenamiento dejaban de distinguir horas baratas y caras cuando subía el
   nivel de precios. El autor decidió usar una ventana causal de 168 horas. Con ese cambio la
   Iteración de Valores pasó de −3.8 % a +6.5 % frente a la Línea Base.
+- **Rediseño del aprendizaje de Q-Learning.** El autor pidió explicar por qué Q-Learning perdía
+  contra la Línea Base. La IA planteó hipótesis y las comprobó con experimentos cortos elegidos
+  solo con validación (máscara de acciones, Doble Q-Learning, tasa decreciente y *reward
+  shaping*). Los dos cambios que funcionaron, *reward shaping* basado en potencial con la
+  mediana móvil y `α = 1/n(s,a)^ω`, se integraron por decisión del autor. Con los mismos 5,000
+  episodios, Q-Learning pasó de 37,854 a 82,222 COP en prueba. El autor también decidió agregar
+  escenarios por presupuesto de entrenamiento (50, 5,000 y 50,000 episodios) al dashboard.
 - **Loop agéntico manual** (`src/agent/llm_agent.py`). Bucle con límite de iteraciones, memoria
   acotada y manejo del error como observación. Las pruebas con el LLM real mostraron que el
   modelo completaba la normativa con conocimiento propio; el prompt de sistema se reforzó para
@@ -96,8 +103,22 @@ lo ejecutó en su entorno local y decidió qué cambios se integraban.
   multilingüe (16/18 frente a 15/18 fragmentos de la fuente correcta) antes de mantener el
   elegido.
 - **Dashboard** (`src/dashboard/app.py`). Conexión de los controles a `simular()`, tarjetas de
-  ahorro de las tres políticas y gráficas de Plotly. Se verificó sin navegador con el
-  `AppTest` de Streamlit.
+  ahorro de las tres políticas, gráficas de Plotly y un rediseño visual pedido por el autor a
+  partir de una maqueta propia: tema oscuro con tarjetas blancas, pestañas de análisis y
+  copiloto, una sección por gráfica, barra lateral con secciones plegables y preguntas
+  sugeridas en el chat. Se verificó sin navegador con el `AppTest` de Streamlit.
+- **Parámetros de negocio.** El autor pidió agregar la eficiencia del sistema y la potencia del
+  inversor, y propuso multiplicar el ahorro por la eficiencia. La IA señaló que eso también
+  abarataría la energía comprada (y achicaría una pérdida), y se aplicó la eficiencia de ida y
+  vuelta al costo evitado de cada descarga. Como las políticas entrenadas con batería ideal
+  hacen ciclos que dejan de ser rentables con pérdidas, cada escenario de Q-Learning se entrenó
+  con cada eficiencia de la grilla y la Iteración de Valores se replanifica con su modelo.
+- **Resumen ejecutivo.** Por pedido del autor, un botón envía las cifras ya calculadas de la
+  simulación al LLM, que redacta un párrafo para gerencia. El prompt prohíbe calcular cifras
+  nuevas y obliga a decir si Q-Learning ahorra menos que la Línea Base.
+- **Reproducibilidad de los datos.** Al reejecutar el notebook se detectó que XM había revisado
+  los precios del 2026-11-08, lo que cambiaba las cifras. Desde entonces el notebook usa por
+  defecto el respaldo versionado y solo descarga de la API si se pide.
 - **Script determinista de pruebas** (`tests/test_agent.py`). El autor definió la batería de 12
   preguntas y la exigencia de verificar herramientas, citas y cifras. El asistente implementó
   los verificadores sin usar un LLM como juez y los probó sin conexión antes de gastar llamadas
@@ -118,9 +139,10 @@ lo ejecutó en su entorno local y decidió qué cambios se integraban.
 - **Las cifras son reales.** Todas las métricas reportadas provienen de ejecuciones reales en
   el entorno local con precios de XM, no de estimaciones de la IA. El notebook comprueba con
   `assert` que la herramienta del agente reproduce sus cifras.
-- **Los resultados desfavorables se reportan.** Q-Learning queda un 57.6 % por debajo de la
-  Línea Base en prueba, y así está documentado. No se ajustaron hiperparámetros mirando los días
-  de prueba.
+- **Los resultados desfavorables se reportan.** Incluso con el diseño nuevo, Q-Learning queda
+  un 8.0 % por debajo de la Línea Base en prueba (le gana en validación), y así está
+  documentado junto con los resultados del diseño anterior. No se ajustaron hiperparámetros ni
+  se eligieron diseños mirando los días de prueba.
 - **Las fuentes se verificaron.** Las resoluciones del corpus se descargaron del gestor
   normativo oficial de la CREG, sus URLs están documentadas en `corpus_regulacion/README.md` y
   se declara que la CREG 098 aparece derogada.

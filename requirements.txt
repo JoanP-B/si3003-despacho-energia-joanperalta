@@ -31,7 +31,7 @@ langchain-text-splitters  # RecursiveCharacterTextSplitter
 tiktoken               # conteo de tokens
 
 # --- Dashboard ---
-streamlit>=1.46       # usa width="stretch" en botones y gráficas
+streamlit>=1.67       # pestañas con estado (st.tabs key), segmented_control, width="stretch"
 plotly
 
 # --- Utilidades ---

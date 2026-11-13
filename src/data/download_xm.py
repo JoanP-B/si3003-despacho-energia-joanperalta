@@ -6,6 +6,9 @@ métrica ``PrecBolsNaci`` (COP/kWh, una columna por hora del día).
 Plan B: cada descarga exitosa se guarda en ``data/raw/xm_precio_bolsa.csv``. Si la API falla
 (sin red, caída del servicio, certificado), se usa ese CSV filtrado al rango pedido.
 
+Reproducibilidad: XM revisa los precios de días recientes, así que dos descargas del mismo
+rango pueden diferir. El notebook usa por defecto el CSV versionado (``actualizar=False``).
+
 Uso:
     python -m src.data.download_xm --inicio 2025-11-10 --fin 2026-11-09
 """
@@ -92,14 +95,27 @@ def a_serie_horaria(df: pd.DataFrame) -> pd.DataFrame:
     return largo[horas_por_dia == 24].reset_index(drop=True)
 
 
-def obtener_precio_bolsa(inicio: date, fin: date) -> tuple[pd.DataFrame, str]:
-    """Intenta la API (y actualiza el respaldo); si falla, usa el CSV local.
+def obtener_precio_bolsa(
+    inicio: date, fin: date, actualizar: bool = True
+) -> tuple[pd.DataFrame, str]:
+    """Obtiene el precio de bolsa entre ``inicio`` y ``fin``.
+
+    Con ``actualizar=True`` intenta la API (y actualiza el respaldo); si falla, usa el CSV
+    local. Con ``actualizar=False`` usa el respaldo si cubre todo el rango, sin consultar la
+    API: así los resultados no cambian cuando XM revisa precios de días recientes.
 
     Returns
     -------
     (df_ancho, origen)
         ``origen`` es ``"XM API"`` o ``"XM respaldo CSV"``.
     """
+    if not actualizar and CSV_RESPALDO.exists():
+        df = cargar_plan_b()
+        fechas = pd.to_datetime(df["Date"]).dt.date
+        if fechas.min() <= inicio and fechas.max() >= fin:
+            print(f"[OK] Usando el respaldo versionado {CSV_RESPALDO.name} (sin consultar la API).")
+            return df[(fechas >= inicio) & (fechas <= fin)].reset_index(drop=True), "XM respaldo CSV"
+        print("[..] El respaldo no cubre el rango pedido; se consulta la API de XM.")
     try:
         df = descargar_precio_bolsa(inicio, fin)
         RAW_DIR.mkdir(parents=True, exist_ok=True)
@@ -113,9 +129,14 @@ def obtener_precio_bolsa(inicio: date, fin: date) -> tuple[pd.DataFrame, str]:
         return df[(fechas >= inicio) & (fechas <= fin)].reset_index(drop=True), "XM respaldo CSV"
 
 
-def obtener_serie_horaria(inicio: date, fin: date) -> tuple[pd.DataFrame, str]:
-    """Precio horario real ``(timestamp, precio_cop_kwh)`` entre ``inicio`` y ``fin``."""
-    df, origen = obtener_precio_bolsa(inicio, fin)
+def obtener_serie_horaria(
+    inicio: date, fin: date, actualizar: bool = True
+) -> tuple[pd.DataFrame, str]:
+    """Precio horario real ``(timestamp, precio_cop_kwh)`` entre ``inicio`` y ``fin``.
+
+    ``actualizar`` se pasa a ``obtener_precio_bolsa``.
+    """
+    df, origen = obtener_precio_bolsa(inicio, fin, actualizar=actualizar)
     serie = a_serie_horaria(df)
     if serie.empty:
         raise RuntimeError(f"No hay días completos de precio entre {inicio} y {fin}.")
